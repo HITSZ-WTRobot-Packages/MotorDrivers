@@ -1,0 +1,4 @@
+name = "DJI"
+pkgname = "MotorDrivers::DJI"
+version = "0.1.0"
+dependencies = ["MotorDrivers::Core", "bsp::CANDriver", "services::Watchdog"]
