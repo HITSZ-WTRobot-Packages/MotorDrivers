@@ -170,7 +170,7 @@ void DMMotor::decode(const uint8_t data[8])
                  inv_reduction_rate_;
     velocity_ = sign_ * vel_rpm;
 
-    // --- automatic zeroing after 1 feedbacks ---
+    // --- automatic zeroing after 50 feedbacks ---
     if (feedback_count_ == 50 && cfg_.auto_zero)
     {
         resetAngle();

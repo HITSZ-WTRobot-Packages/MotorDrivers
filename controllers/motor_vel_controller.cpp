@@ -23,7 +23,7 @@ void MotorVelController::update()
     if (!enabled() || !motor_)
         return;
 
-    // If controller requested internal velocity, internal vel+pos or internal mit, prefer that
+    // If controller requested internal velocity, internal vel+pos, prefer that
     if (ctrl_mode_ == ControlMode::InternalVel || ctrl_mode_ == ControlMode::InternalVelPos)
     {
         motor_->setInternalVelocity(velocity_target_);
