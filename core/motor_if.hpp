@@ -62,7 +62,7 @@ public:
     virtual void setInternalMIT(float t_ff, float p_ref, float v_ref, float kp, float kd) {}
 
     // controller acquisition: ensure only one controller controls this motor
-    bool tryAcquireController(controllers::IController* ctrl)
+    virtual bool tryAcquireController(controllers::IController* ctrl)
     {
         if (controller_ == nullptr)
         {
@@ -72,7 +72,7 @@ public:
         return controller_ == ctrl; // re-acquire allowed
     }
 
-    void releaseController(controllers::IController* ctrl)
+    virtual void releaseController(controllers::IController* ctrl)
     {
         if (controller_ == ctrl)
             controller_ = nullptr;
