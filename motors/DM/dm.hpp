@@ -82,7 +82,7 @@ public:
     [[nodiscard]] bool supportsInternalPosition() const override { return cfg_.mode == Mode::Pos; }
     void               setInternalPosition(float pos) override;
 
-    [[nodiscard]] bool supportsInternalMIT() const override { return true; }
+    [[nodiscard]] bool supportsInternalMIT() const override { return cfg_.mode == Mode::MIT; }
     void setInternalMIT(float t_ff, float p_ref, float v_ref, float kp, float kd) override;
 
     static void CAN_FilterInit(CAN_HandleTypeDef* hcan, uint32_t filter_bank, uint32_t master_id);
