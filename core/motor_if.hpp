@@ -18,8 +18,10 @@ enum class ControlMode
 {
     Default, // use motor's defaultControlMode()
     ExternalPID,
-    InternalVelocity,
+    InternalVel,
+    InternalPos,
     InternalVelPos,
+    InternalMIT,
 };
 
 class IController;
@@ -35,26 +37,29 @@ public:
 
     // default control mode for this motor. Controllers will use this unless user provides explicit
     // override in controller config.
-    virtual controllers::ControlMode defaultControlMode() const
+    [[nodiscard]] virtual controllers::ControlMode defaultControlMode() const
     {
         return controllers::ControlMode::ExternalPID;
     }
 
     // basic feedback
-    virtual float getAngle() const    = 0;
-    virtual float getVelocity() const = 0;
-    virtual void  resetAngle()        = 0;
+    [[nodiscard]] virtual float getAngle() const    = 0;
+    [[nodiscard]] virtual float getVelocity() const = 0;
+    virtual void                resetAngle()        = 0;
 
-    // Current support API
-    virtual bool supportsCurrent() const { return false; }
-    virtual void setCurrent(const float current) { (void)current; }
+    // Current/torque support API
+    [[nodiscard]] virtual bool supportsCurrent() const { return false; }
+    virtual void               setCurrent(const float current) { (void)current; }
 
     // motors may implement internal velocity/position commands
-    virtual bool supportsInternalVelocity() const { return false; }
-    virtual void setInternalVelocity(const float rpm) { (void)rpm; }
+    [[nodiscard]] virtual bool supportsInternalVelocity() const { return false; }
+    virtual void               setInternalVelocity(const float rpm) { (void)rpm; }
 
-    virtual bool supportsInternalPosition() const { return false; }
-    virtual void setInternalPosition(const float pos) { (void)pos; }
+    [[nodiscard]] virtual bool supportsInternalPosition() const { return false; }
+    virtual void               setInternalPosition(const float pos) { (void)pos; }
+
+    [[nodiscard]] virtual bool supportsInternalMIT() const { return false; }
+    virtual void setInternalMIT(float t_ff, float p_ref, float v_ref, float kp, float kd) {}
 
     // controller acquisition: ensure only one controller controls this motor
     bool tryAcquireController(controllers::IController* ctrl)
@@ -73,7 +78,7 @@ public:
             controller_ = nullptr;
     }
 
-    controllers::IController* currentController() const { return controller_; }
+    [[nodiscard]] controllers::IController* currentController() const { return controller_; }
 
 private:
     controllers::IController* controller_;
@@ -118,10 +123,10 @@ public:
             enabled_ = false;
         }
     }
-    bool enabled() const { return enabled_; }
+    [[nodiscard]] bool enabled() const { return enabled_; }
 
     // expose underlying motor for helpers that need direct access
-    motors::IMotor* getMotor() const { return motor_; }
+    [[nodiscard]] motors::IMotor* getMotor() const { return motor_; }
 
 protected:
     IController(motors::IMotor* motor, const ControlMode ctrl_mode) : motor_(motor), enabled_(false)
@@ -144,14 +149,23 @@ protected:
                 assert(motor_->supportsCurrent());
                 ctrl_mode_ = ControlMode::ExternalPID;
                 break;
-            case ControlMode::InternalVelocity:
+            case ControlMode::InternalVel:
                 // 我们充分相信用户能决定好控制模式，如果用户决定的不对，就应该报错，而不是兼容
                 assert(motor_->supportsInternalVelocity());
-                ctrl_mode_ = ControlMode::InternalVelocity;
+                ctrl_mode_ = ControlMode::InternalVel;
                 break;
             case ControlMode::InternalVelPos:
                 assert(motor_->supportsInternalPosition());
                 ctrl_mode_ = ControlMode::InternalVelPos;
+                break;
+            case ControlMode::InternalPos:
+                assert(motor_->supportsInternalPosition());
+                ctrl_mode_ = ControlMode::InternalPos;
+                break;
+            case ControlMode::InternalMIT:
+                // MIT 在速度环 & 位置环 时会自动退化为 ExternalPID
+                assert(motor_->supportsInternalMIT());
+                ctrl_mode_ = ControlMode::InternalMIT;
                 break;
             default:;
             }

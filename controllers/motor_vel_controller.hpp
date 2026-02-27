@@ -24,6 +24,12 @@ public:
     MotorVelController(motors::IMotor* motor, const Config& cfg);
     ~MotorVelController() override;
 
+    bool enable() override
+    {
+        // 速度环控制器不支持内部控制模式
+        return ctrl_mode_ != ControlMode::InternalPos && IController::enable();
+    }
+
     void update() override;
     void setRef(const float& velocity);
 

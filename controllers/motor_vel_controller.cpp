@@ -23,8 +23,8 @@ void MotorVelController::update()
     if (!enabled() || !motor_)
         return;
 
-    // If controller requested internal velocity (or internal vel+pos), prefer that
-    if (ctrl_mode_ == ControlMode::InternalVelocity || ctrl_mode_ == ControlMode::InternalVelPos)
+    // If controller requested internal velocity, internal vel+pos or internal mit, prefer that
+    if (ctrl_mode_ == ControlMode::InternalVel || ctrl_mode_ == ControlMode::InternalVelPos)
     {
         motor_->setInternalVelocity(velocity_target_);
         return;
@@ -40,7 +40,7 @@ void MotorVelController::setRef(const float& velocity)
 {
     velocity_target_ = velocity;
     // Sending internal velocity immediately is decided by resolved control mode
-    if (ctrl_mode_ == ControlMode::InternalVelocity || ctrl_mode_ == ControlMode::InternalVelPos)
+    if (ctrl_mode_ == ControlMode::InternalVel || ctrl_mode_ == ControlMode::InternalVelPos)
     {
         if (motor_)
             motor_->setInternalVelocity(velocity_target_);
