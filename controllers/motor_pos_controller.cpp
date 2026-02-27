@@ -29,7 +29,7 @@ void MotorPosController::update()
     // If fully internal pos+vel mode, sending internal position immediately
     if (ctrl_mode_ == ControlMode::InternalVelPos || ctrl_mode_ == ControlMode::InternalPos)
     {
-        motor_->setInternalVelocity(position_ref_);
+        motor_->setInternalPosition(position_ref_);
         counter_ = 0;
         return;
     }
