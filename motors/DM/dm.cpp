@@ -250,18 +250,21 @@ void DMMotor::CAN_FilterInit(CAN_HandleTypeDef* hcan,
                              const uint32_t     filter_bank,
                              const uint32_t     master_id)
 {
-    master_id_                            = master_id;
-    const CAN_FilterTypeDef sFilterConfig = { .FilterIdHigh         = master_id << 5,
-                                              .FilterIdLow          = 0x0000,
-                                              .FilterMaskIdHigh     = 0x7FF << 5,
-                                              .FilterMaskIdLow      = 0x0000,
-                                              .FilterFIFOAssignment = CAN_FILTER_FIFO0,
-                                              .FilterBank           = filter_bank,
-                                              .FilterMode           = CAN_FILTERMODE_IDMASK,
-                                              .FilterScale          = CAN_FILTERSCALE_32BIT,
-                                              .FilterActivation     = ENABLE,
-                                              .SlaveStartFilterBank = 14 };
-    if (HAL_CAN_ConfigFilter(hcan, &sFilterConfig) != HAL_OK)
+    master_id_ = master_id;
+    CAN_FilterTypeDef filter{};
+    filter.FilterMode           = CAN_FILTERMODE_IDMASK;
+    filter.FilterScale          = CAN_FILTERSCALE_32BIT;
+    filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+    filter.FilterBank           = filter_bank;
+    filter.FilterActivation     = ENABLE;
+    filter.SlaveStartFilterBank = 14;
+
+    // standard id: 11-bit, left shift 5
+    filter.FilterIdHigh     = static_cast<uint16_t>(master_id << 5);
+    filter.FilterIdLow      = 0x0000;
+    filter.FilterMaskIdHigh = static_cast<uint16_t>(0x7FF << 5);
+    filter.FilterMaskIdLow  = 0xFFFF;
+    if (HAL_CAN_ConfigFilter(hcan, &filter) != HAL_OK)
     {
         Error_Handler();
     }
@@ -315,12 +318,12 @@ bool DMMotor::disable()
 
 CAN_TxHeaderTypeDef DMMotor::tx_header(const uint8_t& DLC) const
 {
-    return {
-        .StdId = cfg_.mode | cfg_.id0,
-        .IDE   = CAN_ID_STD,
-        .RTR   = CAN_RTR_DATA,
-        .DLC   = DLC,
-    };
+    CAN_TxHeaderTypeDef hdr{};
+    hdr.StdId = cfg_.mode | cfg_.id0;
+    hdr.IDE   = CAN_ID_STD;
+    hdr.RTR   = CAN_RTR_DATA;
+    hdr.DLC   = DLC;
+    return hdr;
 }
 
 extern "C" void DJI_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
