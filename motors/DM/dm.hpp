@@ -47,7 +47,7 @@ public:
     struct Config
     {
         CAN_HandleTypeDef* hcan;
-        uint8_t            id0; ///< 电调 ID，建议从 0x009 到 0x00F
+        uint8_t            id0; ///< 电调 ID，低 4 位有效，建议从 0x09 到 0x0F
         Type               type;
         Mode               mode;        ///< 电机控制模式，需要在上位机修改
         float              pos_max_rad; ///< 位置最大值，需要在上位机修改

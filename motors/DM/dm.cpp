@@ -102,6 +102,9 @@ static constexpr float get_reduction_rate(const DMMotor::Type type)
 
 DMMotor::DMMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f : 1.0f)
 {
+    // id 仅低四位有效
+    cfg_.id0 &= 0x0F;
+
     inv_reduction_rate_ = 1.0f / // 取倒数将除法转为乘法加快运算速度
                           ((cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f) // 外接减速比
                            * get_reduction_rate(cfg_.type));                      // 电机内部减速比
