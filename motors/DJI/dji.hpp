@@ -9,8 +9,6 @@
  */
 #pragma once
 
-#define CAN_NUM (2)
-
 #include "can_driver.h"
 #include "motor_if.hpp"
 #include "watchdog.hpp"
@@ -104,5 +102,8 @@ private:
 
 } // namespace motors
 
+extern "C"
+{
 void DJI_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan);
 void DJI_CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan);
+}

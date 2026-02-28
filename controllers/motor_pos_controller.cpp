@@ -27,9 +27,9 @@ void MotorPosController::update()
     ++counter_;
 
     // If fully internal pos+vel mode, sending internal position immediately
-    if (ctrl_mode_ == ControlMode::InternalVelPos)
+    if (ctrl_mode_ == ControlMode::InternalVelPos || ctrl_mode_ == ControlMode::InternalPos)
     {
-        motor_->setInternalVelocity(position_ref_);
+        motor_->setInternalPosition(position_ref_);
         counter_ = 0;
         return;
     }
@@ -42,7 +42,7 @@ void MotorPosController::update()
     }
 
     // runtime actions: prefer internal velocity if supported when configured
-    if (ctrl_mode_ == ControlMode::InternalVelocity)
+    if (ctrl_mode_ == ControlMode::InternalVel)
     {
         motor_->setInternalVelocity(position_pid_.getOutput());
         return;

@@ -1,0 +1,4 @@
+name = "DM"
+pkgname = "MotorDrivers::DM"
+version = "0.1.0"
+dependencies = ["MotorDrivers::Core", "bsp::CANDriver", "services::Watchdog", "libs::FixedMap"]
