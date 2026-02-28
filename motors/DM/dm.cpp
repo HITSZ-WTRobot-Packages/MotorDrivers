@@ -95,6 +95,9 @@ static constexpr float get_reduction_rate(const DMMotor::Type type)
     {
     case DMMotor::Type::J4310_2EC:
         return 10.0f;
+    case DMMotor::Type::S3519:
+        return 19.203f;
+    case DMMotor::Type::MotorTypeCount:
     default:
         return 1.0f;
     }
