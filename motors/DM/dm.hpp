@@ -31,6 +31,18 @@ public:
         Pos = 0x100,
         Vel = 0x200,
     };
+    enum class State : uint8_t
+    {
+        Disabled             = 0x0U, // 失能
+        Enabled              = 0x1U, // 使能
+        OverVoltage          = 0x8U, // 超压
+        UnderVoltage         = 0x9U, // 欠压
+        OverCurrent          = 0xAU, // 过电流
+        MosOverheating       = 0xBU, // MOS 过温
+        MotorCoilOverheating = 0xCU, // 电机线圈过温
+        Disconnected         = 0xDU, // 通讯丢失
+        Overload             = 0xEU, // 过载
+    };
 
     struct Config
     {
@@ -102,6 +114,8 @@ public:
             disable();
     }
 
+    [[nodiscard]] State state() const { return feedback_.state; }
+
 private:
     Config cfg_;
 
@@ -117,7 +131,7 @@ private:
         float temp_mos{ 0 };
         float temp_rotor{ 0 };
 
-        uint8_t error{ 0 };
+        State state{ 0 };
 
         int32_t count{ 0 };
     } feedback_{};

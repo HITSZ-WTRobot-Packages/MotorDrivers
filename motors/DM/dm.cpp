@@ -160,7 +160,7 @@ void DMMotor::decode(const uint8_t data[8])
     feedback_.torque     = feedback_torque;
     feedback_.temp_mos   = static_cast<int8_t>(data[6]);
     feedback_.temp_rotor = static_cast<int8_t>(data[7]);
-    feedback_.error      = data[0] & 0x0F;
+    feedback_.state      = static_cast<State>((data[0] >> 4) & 0x0F);
     feedback_count_++;
 
     // --- calculate absolute angle and velocity considering reverse and reduction ---
