@@ -22,6 +22,7 @@ public:
     enum class Type
     {
         J4310_2EC,
+        J10010L_2EC,
         S3519,
 
         MotorTypeCount,
