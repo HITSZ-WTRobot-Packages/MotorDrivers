@@ -33,6 +33,8 @@ public:
     void update() override;
     void setRef(const float& velocity);
 
+    auto& getPID() { return pid_; }
+
 private:
     PIDMotor pid_;
     float    velocity_target_ = 0.0f;
