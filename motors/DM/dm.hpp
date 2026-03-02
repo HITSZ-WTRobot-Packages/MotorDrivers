@@ -156,6 +156,6 @@ private:
 
 extern "C"
 {
-void DJI_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan);
-void DJI_CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan);
+void DM_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan);
+void DM_CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan);
 }

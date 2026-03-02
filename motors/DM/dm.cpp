@@ -54,7 +54,7 @@ static FeedbackMap* find_map(const CAN_HandleTypeDef* hcan)
 }
 
 // 注册电机
-bool register_motor(CAN_HandleTypeDef* hcan, const size_t id0, DMMotor* motor)
+static bool register_motor(CAN_HandleTypeDef* hcan, const size_t id0, DMMotor* motor)
 {
     if (!hcan || !motor)
         return false;
@@ -77,7 +77,7 @@ bool register_motor(CAN_HandleTypeDef* hcan, const size_t id0, DMMotor* motor)
     return m->motors.insert(id0, motor);
 }
 
-bool unregister_motor(CAN_HandleTypeDef* hcan, const size_t id0)
+static bool unregister_motor(CAN_HandleTypeDef* hcan, const size_t id0)
 {
     if (!hcan)
         return false;
@@ -334,7 +334,7 @@ CAN_TxHeaderTypeDef DMMotor::tx_header(const uint8_t& DLC) const
     return hdr;
 }
 
-extern "C" void DJI_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
+extern "C" void DM_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
 {
     do
     {
@@ -349,7 +349,7 @@ extern "C" void DJI_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
     } while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0);
 }
 
-extern "C" void DJI_CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan)
+extern "C" void DM_CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan)
 {
     do
     {

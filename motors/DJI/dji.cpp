@@ -53,7 +53,7 @@ static DJI_FeedbackMap* find_map(const CAN_HandleTypeDef* hcan)
 }
 
 // 注册电机
-bool register_motor(CAN_HandleTypeDef* hcan, const size_t id1, DJIMotor* motor)
+static bool register_motor(CAN_HandleTypeDef* hcan, const size_t id1, DJIMotor* motor)
 {
     if (!hcan || !motor || !valid_id1(id1))
         return false;
@@ -83,7 +83,7 @@ bool register_motor(CAN_HandleTypeDef* hcan, const size_t id1, DJIMotor* motor)
 }
 
 // 注销电机
-bool unregister_motor(CAN_HandleTypeDef* hcan, const size_t id1)
+static bool unregister_motor(CAN_HandleTypeDef* hcan, const size_t id1)
 {
     if (!hcan || !valid_id1(id1))
         return false;
@@ -100,7 +100,7 @@ bool unregister_motor(CAN_HandleTypeDef* hcan, const size_t id1)
 }
 
 // 查找电机
-DJIMotor* get_motor(const CAN_HandleTypeDef* hcan, const CAN_RxHeaderTypeDef* header)
+static DJIMotor* get_motor(const CAN_HandleTypeDef* hcan, const CAN_RxHeaderTypeDef* header)
 {
     if (header->IDE != CAN_ID_STD)
         return nullptr;
