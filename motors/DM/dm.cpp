@@ -297,14 +297,15 @@ void DMMotor::CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
 bool DMMotor::tryAcquireController(controllers::IController* ctrl)
 {
     // 使能电机
-    enable();
+    if (!enabled_)
+        enable();
     return IMotor::tryAcquireController(ctrl);
 }
 
 void DMMotor::releaseController(controllers::IController* ctrl)
 {
-    // TODO: 如何处理发送失败
-    disable();
+    // 此处不在对电机失能处理，因为使用过程中的控制权往往是交接而不是释放，电机不应当失能
+    // disable();
     IMotor::releaseController(ctrl);
 }
 bool DMMotor::enable()
