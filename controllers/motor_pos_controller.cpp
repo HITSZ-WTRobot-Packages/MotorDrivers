@@ -54,4 +54,15 @@ void MotorPosController::update()
     motor_->setCurrent(output);
 }
 
+void MotorPosController::setRef(const float position)
+{
+    position_ref_ = position;
+    // Sending internal position immediately
+    if (ctrl_mode_ == ControlMode::InternalVelPos || ctrl_mode_ == ControlMode::InternalPos)
+    {
+        if (motor_)
+            motor_->setInternalPosition(position_ref_);
+    }
+}
+
 } // namespace controllers
