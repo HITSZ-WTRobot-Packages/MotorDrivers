@@ -47,6 +47,9 @@ public:
     [[nodiscard]] virtual float getVelocity() const = 0;
     virtual void                resetAngle()        = 0;
 
+    // connection state (optional for motor implementations)
+    [[nodiscard]] virtual bool isConnected() const { return false; }
+
     // Current/torque support API
     [[nodiscard]] virtual bool supportsCurrent() const { return false; }
     virtual void               setCurrent(const float current) { (void)current; }

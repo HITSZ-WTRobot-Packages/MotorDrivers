@@ -46,25 +46,40 @@ public:
 
     explicit DJIMotor(const Config& cfg);
     ~DJIMotor() override;
-    float getAngle() const override { return abs_angle_; }
-    float getVelocity() const override { return velocity_; }
-    void  resetAngle() override;
+    float getAngle() const override
+    {
+        return abs_angle_;
+    }
+    float getVelocity() const override
+    {
+        return velocity_;
+    }
+    void resetAngle() override;
 
     void decode(const uint8_t data[8]);
-    bool isConnected() const { return watchdog_.isFed(); }
+    bool isConnected() const override
+    {
+        return watchdog_.isFed();
+    }
 
     controllers::ControlMode defaultControlMode() const override
     {
         return controllers::ControlMode::ExternalPID;
     }
 
-    bool supportsCurrent() const override { return true; }
+    bool supportsCurrent() const override
+    {
+        return true;
+    }
 
     void setCurrent(const float current) override
     {
         iq_cmd_ = static_cast<int16_t>(cfg_.reverse ? -current : current);
     }
-    int16_t getIqCMD() const { return iq_cmd_; }
+    int16_t getIqCMD() const
+    {
+        return iq_cmd_;
+    }
 
     static void CAN_FilterInit(CAN_HandleTypeDef* hcan, uint32_t filter_bank);
     static void SendIqCommand(CAN_HandleTypeDef* hcan, IqSetCMDGroup cmd_group);

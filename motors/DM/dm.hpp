@@ -85,7 +85,7 @@ public:
 
     void decode(const uint8_t data[8]);
 
-    [[nodiscard]] bool isConnected() const { return watchdog_.isFed(); }
+    [[nodiscard]] bool isConnected() const override { return watchdog_.isFed(); }
 
     [[nodiscard]] bool supportsCurrent() const override { return cfg_.mode == Mode::MIT; }
     void               setCurrent(float current) override;
