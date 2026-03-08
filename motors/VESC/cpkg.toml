@@ -1,0 +1,4 @@
+name = "VESC"
+pkgname = "MotorDrivers::VESC"
+version = "0.1.0"
+dependencies = ["MotorDrivers::Core", "bsp::CANDriver", "services::Watchdog", "libs::FixedMap"]
