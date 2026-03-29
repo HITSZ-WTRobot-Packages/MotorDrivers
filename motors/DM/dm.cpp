@@ -137,20 +137,15 @@ void DMMotor::decode(const uint8_t data[8])
     // feed the watchdog to indicate motor is alive
     watchdog_.feed();
 
-    // --- scaling factors ---
-    const float scale_angle = 2.0f * cfg_.pos_max_rad / 65535.0f; // 16-bit position
-    const float scale_vel   = 2.0f * cfg_.vel_max_rad / 4095.0f;  // 12-bit velocity
-    const float scale_t     = 2.0f * cfg_.tor_max / 4095.0f;      // 12-bit torque
-
     // --- extract raw data ---
-    const auto raw_pos = static_cast<float>(data[1] << 8 | data[2]);
-    const auto raw_vel = static_cast<float>(data[3] << 4 | data[4] >> 4);
-    const auto raw_tor = static_cast<float>((data[4] & 0x0F) << 8 | data[5]);
+    const auto raw_pos = static_cast<int16_t>(data[1] << 8 | data[2]);
+    const auto raw_vel = static_cast<int16_t>((data[3] << 4 | data[4] >> 4) - 2047);
+    const auto raw_tor = static_cast<int16_t>(((data[4] & 0x0F) << 8 | data[5]) - 2047);
 
     // --- convert to physical units ---
-    const float feedback_angle  = scale_angle * raw_pos - cfg_.pos_max_rad;
-    const float feedback_vel    = scale_vel * raw_vel - cfg_.vel_max_rad;
-    const float feedback_torque = scale_t * raw_tor - cfg_.tor_max;
+    const float feedback_angle  = static_cast<float>(raw_pos) / 32767 * cfg_.pos_max_rad;
+    const float feedback_vel    = static_cast<float>(raw_vel) / 2047 * cfg_.vel_max_rad;
+    const float feedback_torque = static_cast<float>(raw_tor) / 2047 * cfg_.tor_max;
 
     // --- convert to degrees and rpm ---
     const float angle_deg = RAD2DEG(feedback_angle);
