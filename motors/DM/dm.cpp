@@ -89,17 +89,21 @@ static bool unregister_motor(CAN_HandleTypeDef* hcan, const size_t id0)
     return m->motors.erase(id0);
 }
 
-static constexpr float get_reduction_rate(const DMMotor::Type type)
+static constexpr float get_inv_pos_reduction_rate(const DMMotor::Type type)
 {
     switch (type)
     {
-    case DMMotor::Type::J4310_2EC:
-        return 10.0f;
-    case DMMotor::Type::J10010L_2EC:
-        return 1.0f;
     case DMMotor::Type::S3519:
-        return 19.203f;
-    case DMMotor::Type::MotorTypeCount:
+        return 1.0f / 19.203f;
+    default:
+        return 1.0f;
+    }
+}
+
+static constexpr float get_inv_vel_reduction_rate(const DMMotor::Type type)
+{
+    switch (type)
+    {
     default:
         return 1.0f;
     }
@@ -111,8 +115,7 @@ DMMotor::DMMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f : 1.
     cfg_.id0 &= 0x0F;
 
     inv_reduction_rate_ = 1.0f / // 取倒数将除法转为乘法加快运算速度
-                          ((cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f) // 外接减速比
-                           * get_reduction_rate(cfg_.type));                      // 电机内部减速比
+                          (cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f); // 外接减速比
 
     pos_max_deg = RAD2DEG(cfg_.pos_max_rad);
 
@@ -170,8 +173,8 @@ void DMMotor::decode(const uint8_t data[8])
     abs_angle_ = sign_ *
                  (static_cast<float>(feedback_.count) * pos_max_deg * 2 +
                   (angle_deg - angle_zero_)) *
-                 inv_reduction_rate_;
-    velocity_ = sign_ * vel_rpm;
+                 inv_reduction_rate_ * get_inv_pos_reduction_rate(cfg_.type);
+    velocity_ = sign_ * vel_rpm * inv_reduction_rate_ * get_inv_vel_reduction_rate(cfg_.type);
 
     // --- automatic zeroing after 50 feedbacks ---
     if (feedback_count_ == 50 && cfg_.auto_zero)
