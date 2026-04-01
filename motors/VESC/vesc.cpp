@@ -87,6 +87,9 @@ VESCMotor::VESCMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f 
     if (cfg_.electrodes == 0)
         cfg_.electrodes = 1;
 
+    inv_reduction_rate_ = 1.0f / (cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f);
+    erpm2velocity_      = inv_reduction_rate_ / static_cast<float>(cfg_.electrodes);
+
     if (!register_motor(cfg_.hcan, cfg_.id, this))
         Error_Handler();
 }
@@ -128,8 +131,9 @@ void VESCMotor::sendSetCommand(const SetCommand cmd, const float value) const
         data_value = static_cast<int32_t>(clamp(value, kSetCurrentBrakeMax) * 1.0e3f);
         break;
     case SetCommand::SetRPM:
-        data_value = static_cast<int32_t>(clamp(sign_ * value, kSetRPMMax) *
-                                          static_cast<float>(cfg_.electrodes));
+        data_value = static_cast<int32_t>(
+                clamp(sign_ * value * static_cast<float>(cfg_.electrodes) * cfg_.reduction_rate,
+                      kSetRPMMax));
         break;
     case SetCommand::SetPosition:
         data_value = static_cast<int32_t>(clamp(sign_ * value, kSetPositionMax) * 1.0e6f);
@@ -172,11 +176,6 @@ void VESCMotor::setInternalVelocity(const float rpm)
     sendSetCommand(SetCommand::SetRPM, rpm);
 }
 
-void VESCMotor::setInternalPosition(const float pos)
-{
-    sendSetCommand(SetCommand::SetPosition, pos);
-}
-
 void VESCMotor::decode(const StatusCommand status_cmd, const uint8_t data[8])
 {
     watchdog_.feed();
@@ -188,7 +187,7 @@ void VESCMotor::decode(const StatusCommand status_cmd, const uint8_t data[8])
         feedback_.erpm          = static_cast<float>(be_to_i32(data + 0));
         feedback_.current_motor = static_cast<float>(be_to_i16(data + 4)) / 10.0f;
         feedback_.duty          = static_cast<float>(be_to_i16(data + 6)) / 1000.0f;
-        velocity_               = sign_ * feedback_.erpm / static_cast<float>(cfg_.electrodes);
+        velocity_               = sign_ * erpm2velocity_ * feedback_.erpm;
         break;
 
     case StatusCommand::VESC_CAN_STATUS_2:
@@ -216,8 +215,10 @@ void VESCMotor::decode(const StatusCommand status_cmd, const uint8_t data[8])
 
         feedback_.pos = new_pos;
 
-        abs_angle_ = sign_ * (static_cast<float>(feedback_.round_cnt) * 360.0f + feedback_.pos -
-                              angle_zero_);
+        abs_angle_ = sign_ *
+                     (static_cast<float>(feedback_.round_cnt) * 360.0f +
+                      (feedback_.pos - angle_zero_)) *
+                     inv_reduction_rate_;
         break;
     }
 
@@ -262,8 +263,8 @@ void VESCMotor::CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
     if (!m)
         return;
 
-    const uint8_t id    = static_cast<uint8_t>(header->ExtId & 0xFF);
-    auto          motor = m->motors.find(id);
+    const auto id    = static_cast<uint8_t>(header->ExtId & 0xFF);
+    const auto motor = m->motors.find(id);
     if (!motor)
         return;
 

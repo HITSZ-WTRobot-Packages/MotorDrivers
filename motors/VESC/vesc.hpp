@@ -86,8 +86,9 @@ public:
     struct Config
     {
         CAN_HandleTypeDef* hcan;
-        uint8_t            id;         ///< 控制器 id，0xFF 代表广播
-        uint8_t            electrodes; ///< 电极数
+        uint8_t            id;             ///< 控制器 id，0xFF 代表广播
+        uint8_t            electrodes;     ///< 电极数
+        float              reduction_rate; ///< 减速比（VESC 上位机设置的减速比不生效）
 
         bool auto_zero = true; ///< 自动重置零点
         bool reverse   = false;
@@ -96,55 +97,27 @@ public:
     explicit VESCMotor(const Config& cfg);
     ~VESCMotor() override;
 
-    [[nodiscard]] float getAngle() const override
-    {
-        return abs_angle_;
-    }
-    [[nodiscard]] float getVelocity() const override
-    {
-        return velocity_;
-    }
-    void resetAngle() override;
+    [[nodiscard]] float getAngle() const override { return abs_angle_; }
+    [[nodiscard]] float getVelocity() const override { return velocity_; }
+    void                resetAngle() override;
 
     [[nodiscard]] controllers::ControlMode defaultControlMode() const override
     {
         return controllers::ControlMode::ExternalPID;
     }
 
-    [[nodiscard]] bool isConnected() const
-    {
-        return watchdog_.isFed();
-    }
+    [[nodiscard]] bool isConnected() const override { return watchdog_.isFed(); }
 
-    [[nodiscard]] bool supportsCurrent() const override
-    {
-        return true;
-    }
-    void setCurrent(float current) override;
+    [[nodiscard]] bool supportsCurrent() const override { return true; }
+    void               setCurrent(float current) override;
 
-    [[nodiscard]] bool supportsInternalVelocity() const override
-    {
-        return true;
-    }
-    void setInternalVelocity(float rpm) override;
+    [[nodiscard]] bool supportsInternalVelocity() const override { return true; }
+    void               setInternalVelocity(float rpm) override;
 
     /**
      * @brief 是否支持内部位置控制
      */
-    [[nodiscard]] bool supportsInternalPosition() const override
-    {
-        return true;
-    }
-    /**
-     * @brief 设置内部位置
-     * @param pos 目标位置
-     */
-    void setInternalPosition(float pos) override;
-
-    /**
-     * @brief 定期重发最新 set 指令，保持 VESC 目标激活
-     */
-    void update();
+    [[nodiscard]] bool supportsInternalPosition() const override { return false; }
 
     /**
      * @brief 初始化 CAN 滤波器
@@ -200,14 +173,12 @@ private:
 
     float angle_zero_ = 0.0f; ///< 零点角度
 
-    float sign_ = 1.0f;
+    float sign_;
+    float erpm2velocity_;
+    float inv_reduction_rate_;
 
     float abs_angle_ = 0.0f; ///< 绝对角度
     float velocity_  = 0.0f; ///< 速度
-
-    SetCommand last_set_cmd_    = SetCommand::SetRPM;
-    float      last_set_value_  = 0.0f;
-    bool       has_pending_set_ = false;
 
     /**
      * @brief 解码状态反馈
