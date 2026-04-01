@@ -8,7 +8,7 @@
 namespace controllers
 {
 MotorVelController::MotorVelController(motors::IMotor* motor, const Config& cfg) :
-    IController(motor, cfg.ctrl_mode), pid_(cfg.pid)
+    IController(motor, cfg.ctrl_mode), pid_(cfg.pid), internal_set_ratio_(cfg.internal_set_ratio)
 {
 }
 
@@ -26,7 +26,12 @@ void MotorVelController::update()
     // If controller requested internal velocity, internal vel+pos, prefer that
     if (ctrl_mode_ == ControlMode::InternalVel || ctrl_mode_ == ControlMode::InternalVelPos)
     {
-        motor_->setInternalVelocity(velocity_target_);
+        ++internal_set_prescaler_;
+        if (internal_set_prescaler_ >= internal_set_ratio_)
+        {
+            motor_->setInternalVelocity(velocity_target_);
+            internal_set_prescaler_ = 0;
+        }
         return;
     }
 

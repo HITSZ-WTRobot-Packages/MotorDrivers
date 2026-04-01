@@ -9,7 +9,8 @@ namespace controllers
 {
 MotorPosController::MotorPosController(motors::IMotor* motor, const Config& cfg) :
     IController(motor, cfg.ctrl_mode), position_pid_(cfg.position_pid),
-    velocity_pid_(cfg.velocity_pid), pos_vel_freq_ratio_(cfg.pos_vel_freq_ratio)
+    velocity_pid_(cfg.velocity_pid), pos_vel_freq_ratio_(cfg.pos_vel_freq_ratio),
+    internal_set_ratio_(cfg.internal_set_ratio)
 {
 }
 
@@ -24,27 +25,36 @@ void MotorPosController::update()
     if (!enabled() || !motor_)
         return;
 
-    ++counter_;
-
     // If fully internal pos+vel mode, sending internal position immediately
     if (ctrl_mode_ == ControlMode::InternalVelPos || ctrl_mode_ == ControlMode::InternalPos)
     {
-        motor_->setInternalPosition(position_ref_);
-        counter_ = 0;
+        ++internal_set_prescaler_;
+        if (internal_set_prescaler_ >= internal_set_ratio_)
+        {
+            motor_->setInternalPosition(position_ref_);
+            internal_set_prescaler_ = 0;
+        }
         return;
     }
 
+    ++pos_vel_prescaler_;
+
     // position loop executed at pos_vel_freq_ratio
-    if (counter_ >= pos_vel_freq_ratio_)
+    if (pos_vel_prescaler_ >= pos_vel_freq_ratio_)
     {
         position_pid_.calc(position_ref_, motor_->getAngle());
-        counter_ = 0;
+
+        // runtime actions: prefer internal velocity if supported when configured
+        if (ctrl_mode_ == ControlMode::InternalVel)
+        {
+            motor_->setInternalVelocity(position_pid_.getOutput());
+        }
+
+        pos_vel_prescaler_ = 0;
     }
 
-    // runtime actions: prefer internal velocity if supported when configured
     if (ctrl_mode_ == ControlMode::InternalVel)
     {
-        motor_->setInternalVelocity(position_pid_.getOutput());
         return;
     }
 
