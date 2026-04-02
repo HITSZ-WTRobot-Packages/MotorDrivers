@@ -15,7 +15,9 @@
 namespace motors
 {
 
-constexpr size_t kMaxMotorPerCan = 8;
+constexpr size_t   kMaxMotorPerCan = 8;
+constexpr uint32_t kDjiCANIdMin    = 0x201;
+constexpr uint32_t kDjiCANIdMax    = 0x208;
 
 // CAN 映射结构体
 struct DJI_FeedbackMap
@@ -104,7 +106,7 @@ static DJIMotor* get_motor(const CAN_HandleTypeDef* hcan, const CAN_RxHeaderType
 {
     if (header->IDE != CAN_ID_STD)
         return nullptr;
-    const uint8_t id0 = header->StdId - 0x201;
+    const uint8_t id0 = header->StdId - kDjiCANIdMin;
     if (!hcan || !valid_id0(id0))
         return nullptr;
     const DJI_FeedbackMap* m = find_map(hcan);
@@ -238,10 +240,8 @@ void DJIMotor::CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
                                       const CAN_RxHeaderTypeDef* header,
                                       const uint8_t*             data)
 {
-    DJI_FeedbackMap* m = find_map(hcan);
-    if (m == nullptr)
+    if (header->StdId < kDjiCANIdMin || header->StdId > kDjiCANIdMax)
         return;
-
     DJIMotor* motor = get_motor(hcan, header);
     if (motor != nullptr)
         motor->decode(data);
