@@ -86,9 +86,9 @@ public:
     struct Config
     {
         CAN_HandleTypeDef* hcan;
-        uint8_t            id;             ///< 控制器 id，0xFF 代表广播
-        uint8_t            electrodes;     ///< 电极数
-        float              reduction_rate; ///< 减速比（VESC 上位机设置的减速比不生效）
+        uint8_t            id;                    ///< 控制器 id，0xFF 代表广播
+        uint8_t            electrodes;            ///< 电极数
+        float              reduction_rate = 1.0f; ///< 减速比（VESC 上位机设置的减速比不生效）
 
         bool auto_zero = true; ///< 自动重置零点
         bool reverse   = false;

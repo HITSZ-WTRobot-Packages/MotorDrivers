@@ -87,7 +87,9 @@ VESCMotor::VESCMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f 
     if (cfg_.electrodes == 0)
         cfg_.electrodes = 1;
 
-    inv_reduction_rate_ = 1.0f / (cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f);
+    cfg_.reduction_rate = cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f;
+
+    inv_reduction_rate_ = 1.0f / cfg_.reduction_rate;
     erpm2velocity_      = inv_reduction_rate_ / static_cast<float>(cfg_.electrodes);
 
     if (!register_motor(cfg_.hcan, cfg_.id, this))
