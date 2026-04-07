@@ -186,29 +186,22 @@ MotorDrivers/
 - `CAN_FilterInit(...)`：初始化对应协议的滤波器
 - `CANBaseReceiveCallback(...)`：处理一帧已经取出的 CAN 报文
 
-如果你的项目已经有统一 CAN 分发器，推荐把 `CANBaseReceiveCallback(...)` 注册进去；如果没有，也可以在
+如果你的项目已经有统一 CAN 接收层，推荐把 `CANBaseReceiveCallback(...)` 注册进去；如果没有，也可以在
 HAL 的 FIFO 回调里直接调用它们。
 
-### 最小接收分发样例
+如果你使用的是 `BasicComponents` 仓库里的
+[`bsp/can_driver`](https://github.com/HITSZ-WTRobot-Packages/BasicComponents/tree/docs/lots-of-documents/bsp/can_driver)，
+它的接收路径就是“先从 FIFO 里取出一帧，再按注册顺序依次直接调用所有已注册回调”。这种情况下，可以把三家的
+`CANBaseReceiveCallback(...)` 直接注册给它。
 
-下面这个样例只展示“如何把一帧 CAN 报文分发给三类驱动”，便于移植到不同项目里。
+### 最小接收样例（直接调用）
+
+下面这个样例只展示“如何在 HAL FIFO 回调里把一帧 CAN 报文直接交给三类驱动”，便于移植到不同项目里。
 
 ```cpp
 #include "dji.hpp"
 #include "dm.hpp"
 #include "vesc.hpp"
-
-namespace
-{
-void dispatch_motor_frame(const CAN_HandleTypeDef*   hcan,
-                          const CAN_RxHeaderTypeDef* header,
-                          const uint8_t              data[8])
-{
-    motors::DJIMotor::CANBaseReceiveCallback(hcan, header, data);
-    motors::DMMotor::CANBaseReceiveCallback(hcan, header, data);
-    motors::VESCMotor::CANBaseReceiveCallback(hcan, header, data);
-}
-} // namespace
 
 void motor_can_filter_init()
 {
@@ -229,13 +222,35 @@ extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan)
             return;
         }
 
-        dispatch_motor_frame(hcan, &header, data);
+        motors::DJIMotor::CANBaseReceiveCallback(hcan, &header, data);
+        motors::DMMotor::CANBaseReceiveCallback(hcan, &header, data);
+        motors::VESCMotor::CANBaseReceiveCallback(hcan, &header, data);
     }
 }
 ```
 
-如果你的项目已经封装好了统一 CAN 分发器，也可以不写上面的 FIFO 轮询，而是直接把三家的
-`CANBaseReceiveCallback(...)` 注册到分发器中。
+如果你的项目已经封装好了统一 CAN 接收层，也可以不写上面的 FIFO 轮询，而是直接把三家的
+`CANBaseReceiveCallback(...)` 注册进去。以 `BasicComponents` 的 `bsp/can_driver` 为例，可以写成：
+
+```cpp
+#include "can_driver.hpp"
+#include "dji.hpp"
+#include "dm.hpp"
+#include "vesc.hpp"
+
+void motor_can_init()
+{
+    motors::DJIMotor::CAN_FilterInit(&hcan1, 0);
+    motors::DMMotor::CAN_FilterInit(&hcan1, 1, 0x12);
+    motors::VESCMotor::CAN_FilterInit(&hcan1, 2);
+
+    CAN_InitMainCallback(&hcan1);
+    CAN_RegisterCallback(&hcan1, motors::DJIMotor::CANBaseReceiveCallback);
+    CAN_RegisterCallback(&hcan1, motors::DMMotor::CANBaseReceiveCallback);
+    CAN_RegisterCallback(&hcan1, motors::VESCMotor::CANBaseReceiveCallback);
+    CAN_Start(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+}
+```
 
 ## 调用样例
 
