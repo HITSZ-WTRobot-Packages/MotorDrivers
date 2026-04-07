@@ -2,7 +2,7 @@
  * @file    vesc.cpp
  * @author  syhanjin
  * @date    2026-03-06
- * @brief   VESC motor driver (C++)
+ * @brief   VESC 电机驱动实现
  */
 #include "vesc.hpp"
 
@@ -15,6 +15,7 @@
 namespace motors
 {
 
+// 一条 CAN 总线对应一张 VESC id -> 电机对象的映射表。
 struct FeedbackMap
 {
     CAN_HandleTypeDef*                                      hcan = nullptr;
@@ -69,6 +70,7 @@ static bool unregister_motor(CAN_HandleTypeDef* hcan, const size_t id)
     return m->motors.erase(id);
 }
 
+// VESC 状态反馈里的多字节数据使用大端格式。
 static int32_t be_to_i32(const uint8_t* bytes)
 {
     return static_cast<int32_t>(
@@ -84,6 +86,8 @@ static int16_t be_to_i16(const uint8_t* bytes)
 
 VESCMotor::VESCMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f : 1.0f)
 {
+    // 实际参与换算的是“极对数”和减速比：
+    // ERPM = 输出轴机械 rpm * 减速比 * 极对数。
     if (cfg_.electrodes == 0)
         cfg_.electrodes = 1;
 
@@ -124,6 +128,7 @@ void VESCMotor::sendSetCommand(const SetCommand cmd, const float value) const
     switch (cmd)
     {
     case SetCommand::SetDuty:
+        // VESC 协议要求把浮点物理量缩放成整数再发送。
         data_value = static_cast<int32_t>(clamp(sign_ * value, kSetDutyMax) * 1.0e5f);
         break;
     case SetCommand::SetCurrent:
@@ -133,6 +138,7 @@ void VESCMotor::sendSetCommand(const SetCommand cmd, const float value) const
         data_value = static_cast<int32_t>(clamp(value, kSetCurrentBrakeMax) * 1.0e3f);
         break;
     case SetCommand::SetRPM:
+        // 对外接口使用输出轴机械 rpm，发送前换算成 VESC 协议要求的 ERPM。
         data_value = static_cast<int32_t>(
                 clamp(sign_ * value * static_cast<float>(cfg_.electrodes) * cfg_.reduction_rate,
                       kSetRPMMax));
@@ -150,6 +156,7 @@ void VESCMotor::sendSetCommand(const SetCommand cmd, const float value) const
         return;
     }
 
+    // 标准 VESC 设置帧只使用前 4 个字节传数值。
     const uint8_t data[8] = { static_cast<uint8_t>(data_value >> 24),
                               static_cast<uint8_t>(data_value >> 16),
                               static_cast<uint8_t>(data_value >> 8),
@@ -180,16 +187,19 @@ void VESCMotor::setInternalVelocity(const float rpm)
 
 void VESCMotor::decode(const StatusCommand status_cmd, const uint8_t data[8])
 {
+    // TODO: vesc 大概率会做降频处理，此处需要支持自定义超时时间
     watchdog_.feed();
     ++feedback_count_;
 
     switch (status_cmd)
     {
     case StatusCommand::VESC_CAN_STATUS_1:
+        // 状态 1 里主要是转速、电流和占空比。
         feedback_.erpm          = static_cast<float>(be_to_i32(data + 0));
         feedback_.current_motor = static_cast<float>(be_to_i16(data + 4)) / 10.0f;
         feedback_.duty          = static_cast<float>(be_to_i16(data + 6)) / 1000.0f;
-        velocity_               = sign_ * erpm2velocity_ * feedback_.erpm;
+        // 协议反馈给出的是 ERPM，这里再按极对数和减速比还原成输出轴机械 rpm。
+        velocity_ = sign_ * erpm2velocity_ * feedback_.erpm;
         break;
 
     case StatusCommand::VESC_CAN_STATUS_2:
@@ -210,6 +220,7 @@ void VESCMotor::decode(const StatusCommand status_cmd, const uint8_t data[8])
 
         const float new_pos = static_cast<float>(be_to_i16(data + 6)) / 50.0f;
 
+        // 位置反馈是 0~360 度单圈值，需要做跨圈展开。
         if (new_pos < 90.0f && feedback_.pos > 270.0f)
             feedback_.round_cnt++;
         else if (new_pos > 270.0f && feedback_.pos < 90.0f)
@@ -270,12 +281,14 @@ void VESCMotor::CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
     if (!motor)
         return;
 
+    // 扩展帧 ID 高字节是状态类型，低字节是控制器 ID。
     const auto status_cmd = static_cast<StatusCommand>((header->ExtId >> 8) & 0xFF);
     motor->decode(status_cmd, data);
 }
 
 extern "C" void VESC_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
 {
+    // FIFO 可能同时积压多帧状态包，需要循环读空。
     do
     {
         CAN_RxHeaderTypeDef header;
@@ -291,6 +304,7 @@ extern "C" void VESC_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
 
 extern "C" void VESC_CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan)
 {
+    // FIFO1 的处理逻辑与 FIFO0 相同。
     do
     {
         CAN_RxHeaderTypeDef header;
