@@ -2,6 +2,7 @@
  * @file    motor_vel_controller.cpp
  * @author  syhanjin
  * @date    2026-01-28
+ * @brief   通用速度控制器实现
  */
 #include "motor_vel_controller.hpp"
 
@@ -23,7 +24,7 @@ void MotorVelController::update()
     if (!enabled() || !motor_)
         return;
 
-    // If controller requested internal velocity, internal vel+pos, prefer that
+    // 如果驱动器自己带速度环，就直接把目标速度交给驱动器，避免重复做外部 PID。
     if (ctrl_mode_ == ControlMode::InternalVel || ctrl_mode_ == ControlMode::InternalVelPos)
     {
         ++internal_set_prescaler_;
@@ -35,16 +36,17 @@ void MotorVelController::update()
         return;
     }
 
-    // External PID path
+    // 外部 PID 模式：根据当前速度反馈算出电流 / 力矩类输出。
     const float output = pid_.calc(velocity_target_, motor_->getVelocity());
 
     motor_->setCurrent(output);
 }
 
-void MotorVelController::setRef(const float& velocity)
+void MotorVelController::setRef(const float velocity)
 {
     velocity_target_ = velocity;
-    // Sending internal velocity immediately is decided by resolved control mode
+
+    // 内部速度模式下，改参考值后立即发送一次，减少等待下个周期的迟滞。
     if (ctrl_mode_ == ControlMode::InternalVel || ctrl_mode_ == ControlMode::InternalVelPos)
     {
         if (motor_)
