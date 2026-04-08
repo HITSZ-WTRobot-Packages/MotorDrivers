@@ -183,12 +183,11 @@ void DJIMotor::decode(const uint8_t data[8])
     // 因此在 1 kHz 反馈下，相邻两帧之间都不可能跨过整整一圈，`round_cnt` 每帧至多变化一次，
     // 不会出现“一帧跨过多圈”的情况。
     //
-    // TODO: fixbug: 对 M2006 而言，理论单帧最大转角约为 108 deg，已经大于当前 90 deg 的判定裕量；
-    // 当前 90 / 270 deg
-    // 阈值在极限工况下可能仍有漏判一次过零的风险。这里按要求只补说明，不改原逻辑。
-    if (feedback_angle < 90 && feedback_.mech_angle > 270)
+
+    const float feedback_angle_delta = feedback_angle - feedback_.mech_angle;
+    if (feedback_angle_delta < -180)
         feedback_.round_cnt++;
-    if (feedback_angle > 270 && feedback_.mech_angle < 90)
+    if (feedback_angle_delta > 180)
         feedback_.round_cnt--;
 
     feedback_.mech_angle = feedback_angle;
