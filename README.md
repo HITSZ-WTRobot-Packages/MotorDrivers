@@ -190,7 +190,7 @@ MotorDrivers/
 HAL 的 FIFO 回调里直接调用它们。
 
 如果你使用的是 `BasicComponents` 仓库里的
-[`bsp/can_driver`](https://github.com/HITSZ-WTRobot-Packages/BasicComponents/tree/docs/lots-of-documents/bsp/can_driver)，
+[`bsp/can_driver`](https://github.com/HITSZ-WTRobot-Packages/BasicComponents/tree/main/bsp/can_driver)，
 它的接收路径就是“先从 FIFO 里取出一帧，再按注册顺序依次直接调用所有已注册回调”。这种情况下，可以把三家的
 `CANBaseReceiveCallback(...)` 直接注册给它。
 
