@@ -168,10 +168,13 @@ void DJIMotor::decode(const uint8_t data[8])
     // TODO: 堵转电流检测
     // const float feedback_current = (float)((int16_t)data[4] << 8 | data[5]) / 16384.0f * 20.0f;
 
-    // DJI 反馈给的是电机反馈侧的单圈机械角度，需要靠越界检测展开成连续角度。
-    // 这里使用 90 / 270 deg 的阈值来判断是否跨过了 0 deg。
+    // DJI 反馈给的是电机反馈侧的单圈机械角度，需要结合相邻帧差分展开成连续角度。
+    // 这里按 `feedback_angle_delta` 是否小于 `-180 deg` 或大于 `180 deg` 来判断是否跨过了
+    // `0 deg`：
+    // - `feedback_angle_delta < -180 deg`：说明角度从接近 `360 deg` 正向跨过了 `0 deg`
+    // - `feedback_angle_delta > 180 deg`：说明角度从接近 `0 deg` 反向跨过了 `0 deg`
     //
-    // 结合当前已支持型号和 1 kHz 反馈频率，先看相邻两帧的最大转角：
+    // 对当前已支持型号，在 `1 kHz` 反馈频率下，相邻两帧的最大转角为：
     // - M2006 和 M3508 减速后的输出最大速度约为 500 rpm
     // - M3508 内部减速比约为 3591 / 187 ~= 19.2
     //   则反馈侧最大速度约为 500 * 19.2 = 9600 rpm
@@ -180,15 +183,16 @@ void DJIMotor::decode(const uint8_t data[8])
     //   则反馈侧最大速度约为 500 * 36 = 18000 rpm
     //   也就是 300 rps = 108000 deg/s，在 1 ms 内约转过 108 deg
     //
-    // 因此在 1 kHz 反馈下，相邻两帧之间都不可能跨过整整一圈，`round_cnt` 每帧至多变化一次，
-    // 不会出现“一帧跨过多圈”的情况。
+    // 因此在 `1 kHz` 反馈下，相邻两帧的真实转角绝对值小于 `180 deg`：
+    // - 不会把正常转动误判成一次过零
+    // - `round_cnt` 每帧至多变化一次
+    // - 不会出现“一帧跨过多圈”的情况
     //
-    // TODO: fixbug: 对 M2006 而言，理论单帧最大转角约为 108 deg，已经大于当前 90 deg 的判定裕量；
-    // 当前 90 / 270 deg
-    // 阈值在极限工况下可能仍有漏判一次过零的风险。这里按要求只补说明，不改原逻辑。
-    if (feedback_angle < 90 && feedback_.mech_angle > 270)
+
+    const float feedback_angle_delta = feedback_angle - feedback_.mech_angle;
+    if (feedback_angle_delta < -180)
         feedback_.round_cnt++;
-    if (feedback_angle > 270 && feedback_.mech_angle < 90)
+    if (feedback_angle_delta > 180)
         feedback_.round_cnt--;
 
     feedback_.mech_angle = feedback_angle;

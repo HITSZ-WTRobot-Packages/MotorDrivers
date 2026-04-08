@@ -92,7 +92,7 @@ public:
     void resetAngle() override;
 
     /**
-     * @brief 解码 8 字节 DJI 反馈报文
+     * @brief 解码 8 字节 DJI 反馈报文，并把单圈机械角度展开成连续角度
      * @param data CAN 数据段
      */
     void decode(const uint8_t data[8]);
@@ -146,12 +146,12 @@ private:
     service::Watchdog watchdog_;
     struct
     {
-        float mech_angle{ 0 }; ///< 单圈机械角度，单位 deg
+        float mech_angle{ 0 }; ///< 电机反馈侧单圈机械角度，单位 deg
         float rpm{ 0 };        ///< 电机侧转速，单位 rpm
         // float current; //< 电流大小
         // float temperature; //< 温度
 
-        int32_t round_cnt{ 0 }; ///< 圈数累计，用于把单圈角度展开成连续角度
+        int32_t round_cnt{ 0 }; ///< 跨圈累计，用于把单圈机械角度展开成连续角度
     } feedback_{};
 
     /* Data */
