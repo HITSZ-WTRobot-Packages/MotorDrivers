@@ -166,9 +166,11 @@ void DMMotor::decode(const uint8_t data[8])
 
     // --- handle angle wrapping ---
     // 达妙的角度反馈是一个有限范围内的位置值，这里通过跨边界检测累计圈数。
-    if (angle_deg < -pos_max_deg / 2 && feedback_.angle >= pos_max_deg / 2)
+    const float angle_delta = angle_deg - feedback_.angle;
+
+    if (angle_delta < -pos_max_deg)
         feedback_.count++;
-    else if (angle_deg > pos_max_deg / 2 && feedback_.angle < -pos_max_deg / 2)
+    else if (angle_delta > pos_max_deg)
         feedback_.count--;
 
     // --- update feedback struct ---
@@ -186,7 +188,7 @@ void DMMotor::decode(const uint8_t data[8])
                  (static_cast<float>(feedback_.count) * pos_max_deg * 2 +
                   (angle_deg - angle_zero_)) *
                  inv_reduction_rate_ * get_inv_pos_reduction_rate(cfg_.type);
-    velocity_  = sign_ * vel_rpm * inv_reduction_rate_ * get_inv_vel_reduction_rate(cfg_.type);
+    velocity_ = sign_ * vel_rpm * inv_reduction_rate_ * get_inv_vel_reduction_rate(cfg_.type);
 
     // --- automatic zeroing after 50 feedbacks ---
     if (feedback_count_ == 50 && cfg_.auto_zero)
