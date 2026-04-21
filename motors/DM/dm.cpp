@@ -151,7 +151,7 @@ void DMMotor::decode(const uint8_t data[8])
 
     // --- extract raw data ---
     // DM 的反馈格式把状态、位置、速度、力矩压在 8 字节里，部分字段需要拆 bit。
-    const auto raw_pos = static_cast<int16_t>(data[1] << 8 | data[2]);
+    const auto raw_pos = static_cast<int16_t>((data[1] << 8 | data[2]) - 32767);
     const auto raw_vel = static_cast<int16_t>((data[3] << 4 | data[4] >> 4) - 2047);
     const auto raw_tor = static_cast<int16_t>(((data[4] & 0x0F) << 8 | data[5]) - 2047);
 
