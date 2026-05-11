@@ -1,19 +1,24 @@
 /**
  * @file    mi.cpp
- * @author  Luoyue777
- * @date    2026-05-05
+ * @author  luoyue
+ * @date    2026-05-11
  * @brief   小米 CyberGear 微电机驱动实现
  *
- * 主要完成：
- * - 扩展帧 CAN 报文到电机对象的映射与分发
- * - mode 2 自动反馈解码（角度、速度、力矩、温度）
- * - mode 0x11 参数读取响应解码
- * - MIT / 位置 / 速度三种模式的指令打包
- * - 使能 / 失能序列
+ * 这里实现了：
+ * - CAN 扩展帧反馈到电机对象的映射与分发
+ * - Type 2 反馈数据到物理量的换算与多圈展开
+ * - Type 1 MIT 控制指令的打包与发送
+ * - Type 3 / 4 使能失能
+ * - Type 6 机械归零
+ * - Type 17 / 18 参数读写
+ *
+ * 物理量 ↔ 协议 uint16 的换算均采用 ±half_range 映射到 [0, 65535] 的方式，
+ * 与 Python 参考实现 pcan_cybergear.py 中的 _float_to_uint / _uint_to_float 保持一致。
  */
 #include "mi.hpp"
-#include "can_driver.h"
+
 #include "FixedPointerMap.hpp"
+#include "can_driver.h"
 
 #include <algorithm>
 #include <array>
@@ -23,11 +28,15 @@
 
 #define DEG2RAD(__DEG__) ((__DEG__) * 3.14159265358979323846f / 180.0f)
 #define RAD2DEG(__RAD__) ((__RAD__) / 3.14159265358979323846f * 180.0f)
-#define RPM2RPS(__RPM__) ((__RPM__) / 60.0f * 2.0f * 3.14159265358979323846f)
-#define RPS2RPM(__RPS__) ((__RPS__) * 60.0f / 2.0f / 3.14159265358979323846f)
+#define RPM2RPS(__RPM__) ((__RPM__) / 60 * 2 * 3.14159265358979323846f)
+#define RPS2RPM(__RPS__) ((__RPS__) * 60 / 2 / 3.14159265358979323846f)
 
 namespace motors
 {
+
+// ---- 派生常量 ----
+
+static constexpr float kPosHalfDeg = RAD2DEG(MIMotor::kPosMaxRad); // ±12.5 rad → ±716.2°
 
 // ---- CAN 反馈映射表 ----
 
@@ -38,7 +47,6 @@ struct FeedbackMap
 };
 
 static std::array<FeedbackMap, CAN_NUM> map{};
-static uint32_t                         global_master_id_;
 
 static FeedbackMap* find_map(const CAN_HandleTypeDef* hcan)
 {
@@ -70,6 +78,7 @@ static bool register_motor(CAN_HandleTypeDef* hcan, const size_t id, MIMotor* mo
         if (!m)
             return false;
     }
+
     return m->motors.insert(id, motor);
 }
 
@@ -81,15 +90,119 @@ static bool unregister_motor(CAN_HandleTypeDef* hcan, const size_t id)
     const auto m = find_map(hcan);
     if (!m)
         return false;
+
     return m->motors.erase(id);
+}
+
+// ---- 字节序读写 ----
+//
+// 协议字节序约定（按 CyberGear 说明书）：
+// - 反馈帧（Type 2）：电机以大端序发送，MCU 以大端序解析
+// - Type 1 控制帧：位置/速度/Kp/Kd 以大端序发送
+// - Type 17 / 18 参数帧：index 与参数值按说明书示例以小端序发送
+//
+// 注意：Python 参考实现里的 struct.pack("HHHH", ...) 默认使用本机小端序，
+// 与说明书 Type 1 示例不一致，这里以说明书为准。
+
+static uint16_t read_u16_be(const uint8_t* src)
+{
+    return static_cast<uint16_t>(src[0]) << 8 | src[1];
+}
+
+static uint16_t read_u16_le(const uint8_t* src)
+{
+    return static_cast<uint16_t>(src[1]) << 8 | src[0];
+}
+
+static void write_u16_be(uint8_t* dst, uint16_t val)
+{
+    dst[0] = static_cast<uint8_t>(val >> 8);
+    dst[1] = static_cast<uint8_t>(val & 0xFF);
+}
+
+static void write_float_le(uint8_t* dst, float val)
+{
+    union
+    {
+        float    f;
+        uint32_t u;
+    } conv{};
+    conv.f = val;
+    dst[0] = static_cast<uint8_t>(conv.u);
+    dst[1] = static_cast<uint8_t>(conv.u >> 8);
+    dst[2] = static_cast<uint8_t>(conv.u >> 16);
+    dst[3] = static_cast<uint8_t>(conv.u >> 24);
+}
+
+// ---- 物理量 <-> 协议 uint16 换算 ----
+//
+// 所有映射均采用与 Python 参考实现一致的公式：
+//   uint = (value - min) / (max - min) * 65535
+//   value = uint / 65535 * (max - min) + min
+//
+// 等价于以 32767.5 为中点的对称映射：
+//   uint = value / half_range * 32767.5 + 32767.5
+//   value = (uint - 32767.5) / 32767.5 * half_range
+
+// 位置：uint16 → deg
+static float pos_raw_to_deg(uint16_t raw)
+{
+    return (static_cast<float>(raw) - 32767.5f) / 32767.5f * kPosHalfDeg;
+}
+
+// 位置：deg → uint16
+static uint16_t pos_deg_to_raw(float deg)
+{
+    deg = std::clamp(deg, -kPosHalfDeg, kPosHalfDeg);
+    return static_cast<uint16_t>((deg / kPosHalfDeg) * 32767.5f + 32767.5f);
+}
+
+// 速度：uint16 → rps
+static float vel_raw_to_rps(uint16_t raw)
+{
+    return (static_cast<float>(raw) - 32767.5f) / 32767.5f * MIMotor::kVelMaxRps;
+}
+
+// 速度：rps → uint16
+static uint16_t vel_rps_to_raw(float rps)
+{
+    rps = std::clamp(rps, -MIMotor::kVelMaxRps, MIMotor::kVelMaxRps);
+    return static_cast<uint16_t>((rps / MIMotor::kVelMaxRps) * 32767.5f + 32767.5f);
+}
+
+// 力矩：uint16 → Nm
+static float tor_raw_to_nm(uint16_t raw)
+{
+    return (static_cast<float>(raw) - 32767.5f) / 32767.5f * MIMotor::kTorqueMax;
+}
+
+// 力矩：Nm → uint16
+static uint16_t tor_nm_to_raw(float nm)
+{
+    nm = std::clamp(nm, -MIMotor::kTorqueMax, MIMotor::kTorqueMax);
+    return static_cast<uint16_t>((nm / MIMotor::kTorqueMax) * 32767.5f + 32767.5f);
+}
+
+// Kp: float → uint16
+static uint16_t kp_to_raw(float kp)
+{
+    kp = std::clamp(kp, 0.0f, MIMotor::kKpMax);
+    return static_cast<uint16_t>(kp / MIMotor::kKpMax * 65535.0f);
+}
+
+// Kd: float → uint16
+static uint16_t kd_to_raw(float kd)
+{
+    kd = std::clamp(kd, 0.0f, MIMotor::kKdMax);
+    return static_cast<uint16_t>(kd / MIMotor::kKdMax * 65535.0f);
 }
 
 // ---- 构造 / 析构 ----
 
 MIMotor::MIMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f : 1.0f)
 {
-    inv_reduction_rate_ =
-        1.0f / (cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f);
+    const float reduction_rate = cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f;
+    inv_reduction_rate_        = 1.0f / reduction_rate;
 
     if (!register_motor(cfg_.hcan, cfg_.id, this))
         Error_Handler();
@@ -100,236 +213,163 @@ MIMotor::~MIMotor()
     unregister_motor(cfg_.hcan, cfg_.id);
 }
 
-// ---- 反馈接口 ----
+// ---- 角度 / 零点 ----
 
 void MIMotor::resetAngle()
 {
-    angle_zero_ = feedback_.angle;
-    abs_angle_  = 0;
+    feedback_.round_cnt = 0;
+    angle_zero_         = feedback_.angle;
+    abs_angle_          = 0.0f;
 }
 
-controllers::ControlMode MIMotor::defaultControlMode() const
+// ---- CAN 报文头 ----
+
+CAN_TxHeaderTypeDef MIMotor::tx_header(const uint8_t comm_type, const uint16_t data_area2) const
 {
-    switch (cfg_.run_mode)
+    CAN_TxHeaderTypeDef hdr{};
+    hdr.ExtId = (static_cast<uint32_t>(comm_type) << 24) |
+                (static_cast<uint32_t>(data_area2) << 8) | (cfg_.id & 0x7F);
+    hdr.IDE = CAN_ID_EXT;
+    hdr.RTR = CAN_RTR_DATA;
+    hdr.DLC = 8;
+    return hdr;
+}
+
+// ---- 使能 / 失能 ----
+
+bool MIMotor::sendEnableDisable(const uint8_t comm_type, const uint8_t data0)
+{
+    uint8_t    data[8] = { data0, 0, 0, 0, 0, 0, 0, 0 };
+    const auto hdr      = tx_header(comm_type, cfg_.master_id);
+    return CAN_SendMessage(cfg_.hcan, &hdr, data) != CAN_SEND_FAILED;
+}
+
+bool MIMotor::enable()
+{
+    if (sendEnableDisable(3, 0))
     {
-    case RunMode::MIT:
-        return controllers::ControlMode::InternalMIT;
-    case RunMode::Pos:
-        return controllers::ControlMode::InternalPos;
-    case RunMode::Spd:
-        return controllers::ControlMode::InternalVel;
-    case RunMode::Cur:
-    default:
-        return controllers::ControlMode::ExternalPID;
+        enabled_ = true;
+        return true;
     }
+    return false;
 }
 
-// ---- 控制输出 ----
-
-void MIMotor::setCurrent(const float current)
+bool MIMotor::disable(const bool clear_fault)
 {
-    // MIT 退化为纯力矩输入：kp=kd=0, pos=vel=0, 仅前馈力矩
-    setInternalMIT(current, 0, 0, 0, 0);
+    if (sendEnableDisable(4, clear_fault ? 1U : 0U))
+    {
+        enabled_ = false;
+        return true;
+    }
+    return false;
 }
 
-void MIMotor::setInternalVelocity(const float rpm)
+bool MIMotor::setMechanicalZero()
 {
-    const float rps     = sign_ * RPM2RPS(rpm);
-    const float clamped = std::clamp(rps, -cfg_.vel_max_rad, cfg_.vel_max_rad);
-
-    uint8_t data[4];
-    std::memcpy(data, &clamped, sizeof(float));
-    writeParam(INDEX_SPEED_CMD, data);
+    return sendEnableDisable(6, 1);
 }
 
-void MIMotor::setInternalPosition(const float pos_deg)
-{
-    const float pos_rad = sign_ * DEG2RAD(pos_deg);
-    const float clamped = std::clamp(pos_rad, -cfg_.pos_max_rad, cfg_.pos_max_rad);
-
-    uint8_t data[4];
-    std::memcpy(data, &clamped, sizeof(float));
-    writeParam(INDEX_POS_CMD, data);
-}
+// ---- MIT 控制指令（Type 1） ----
 
 void MIMotor::setInternalMIT(const float t_ff, float p_ref, float v_ref, float kp, float kd)
 {
-    // 转换为协议单位并限幅
-    const float t_clamped = std::clamp(sign_ * t_ff, -cfg_.tor_max, cfg_.tor_max);
-    const float p_rad     = std::clamp(sign_ * DEG2RAD(p_ref), -cfg_.pos_max_rad, cfg_.pos_max_rad);
-    const float v_rps     = std::clamp(sign_ * DEG2RAD(v_ref), -cfg_.vel_max_rad, cfg_.vel_max_rad);
-    const float kp_c      = std::clamp(kp, 0.0f, cfg_.kp_max);
-    const float kd_c      = std::clamp(kd, 0.0f, cfg_.kd_max);
+    // 外部接口约定：t_ff 用 Nm，p_ref 用 deg，v_ref 用 deg/s，kp/kd 为标量。
+    // 下发前先限幅，再应用方向符号，最后按协议量程换算为 uint16。
+    p_ref = std::clamp(p_ref, -kPosHalfDeg, kPosHalfDeg);
+    v_ref = std::clamp(DEG2RAD(v_ref), -MIMotor::kVelMaxRps, MIMotor::kVelMaxRps);
 
-    // 物理量 → uint16 打包（协议要求）
-    auto float_to_uint = [](float x, float x_min, float x_max, int bits) -> uint16_t {
-        const float span = x_max - x_min;
-        if (x > x_max) x = x_max;
-        else if (x < x_min) x = x_min;
-        return static_cast<uint16_t>((x - x_min) * static_cast<float>((1 << bits) - 1) / span);
-    };
+    const uint16_t pos_u16 = pos_deg_to_raw(sign_ * p_ref);
+    const uint16_t vel_u16 = vel_rps_to_raw(sign_ * v_ref);
+    const uint16_t kp_u16  = kp_to_raw(kp);
+    const uint16_t kd_u16  = kd_to_raw(kd);
+    const uint16_t tor_u16 = tor_nm_to_raw(sign_ * t_ff);
 
-    const uint16_t t_val =
-        float_to_uint(t_clamped, -cfg_.tor_max, cfg_.tor_max, 16);
-    const uint16_t p_val =
-        float_to_uint(p_rad, -cfg_.pos_max_rad, cfg_.pos_max_rad, 16);
-    const uint16_t v_val =
-        float_to_uint(v_rps, -cfg_.vel_max_rad, cfg_.vel_max_rad, 16);
-    const uint16_t kp_val = float_to_uint(kp_c, 0.0f, cfg_.kp_max, 16);
-    const uint16_t kd_val = float_to_uint(kd_c, 0.0f, cfg_.kd_max, 16);
+    uint8_t data[8];
+    write_u16_be(&data[0], pos_u16);
+    write_u16_be(&data[2], vel_u16);
+    write_u16_be(&data[4], kp_u16);
+    write_u16_be(&data[6], kd_u16);
 
-    const uint8_t payload[8] = {
-        static_cast<uint8_t>(p_val >> 8),   // 位置高 8 位
-        static_cast<uint8_t>(p_val & 0xFF), // 位置低 8 位
-        static_cast<uint8_t>(v_val >> 8),   // 速度高 8 位
-        static_cast<uint8_t>(v_val & 0xFF), // 速度低 8 位
-        static_cast<uint8_t>(kp_val >> 8),  // Kp 高 8 位
-        static_cast<uint8_t>(kp_val & 0xFF), // Kp 低 8 位
-        static_cast<uint8_t>(kd_val >> 8),  // Kd 高 8 位
-        static_cast<uint8_t>(kd_val & 0xFF), // Kd 低 8 位
-    };
-
-    // 扩展 ID data 字段承载力矩值
-    sendFrame(Control, t_val, payload);
+    // data2（bit23~8 of ExtId）承载力矩值
+    const auto hdr = tx_header(1, tor_u16);
+    CAN_SendMessage(cfg_.hcan, &hdr, data);
 }
 
-// ---- CAN 通信 ----
+// ---- 电流 / 力矩输入 ----
 
-void MIMotor::sendFrame(const MsgMode mode, const uint16_t data_field, const uint8_t payload[8])
+void MIMotor::setCurrent(const float current)
 {
-    CAN_TxHeaderTypeDef tx_header;
-    tx_header.ExtId = packExtId(cfg_.id, data_field, static_cast<uint8_t>(mode));
-    tx_header.IDE   = CAN_ID_EXT;
-    tx_header.RTR   = CAN_RTR_DATA;
-    tx_header.DLC   = 8;
-
-    CAN_SendMessage(cfg_.hcan, &tx_header, payload);
+    // 纯力矩控制：Kp=Kd=0，仅写入力矩前馈
+    setInternalMIT(current, 0, 0, 0, 0);
 }
 
-void MIMotor::writeParam(const uint16_t index, const uint8_t value[4])
+// ---- 参数读写 ----
+
+bool MIMotor::readParam(const uint16_t index, float& value)
 {
-    uint8_t payload[8] = {};
-    std::memcpy(&payload[0], &index, 2);
-    std::memcpy(&payload[4], value, 4);
+    uint8_t data[8] = { static_cast<uint8_t>(index & 0xFF),
+                        static_cast<uint8_t>((index >> 8) & 0xFF),
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0 };
+    param_read_valid_   = false;
+    param_read_pending_ = true;
+    param_read_index_   = index;
 
-    sendFrame(WriteParam, cfg_.master_id, payload);
-}
-
-void MIMotor::setRunMode(const RunMode mode)
-{
-    uint8_t value[4] = {};
-    value[0]         = static_cast<uint8_t>(mode);
-    writeParam(INDEX_RUN_MODE, value);
-    cfg_.run_mode = mode;
-}
-
-// ---- 反馈解码 ----
-
-void MIMotor::decode(const CAN_RxHeaderTypeDef* header, const uint8_t data[8])
-{
-    if (!header || header->IDE != CAN_ID_EXT)
-        return;
-
-    const uint32_t ext_id    = header->ExtId;
-    const uint8_t  mode      = getExtIdMode(ext_id);
-    const uint16_t data_field = getExtIdData(ext_id);
-    const uint8_t  motor_id  = data_field & 0xFF;
-
-    // 仅处理发给本电机的帧
-    if (motor_id != cfg_.id)
-        return;
-
-    switch (static_cast<MsgMode>(mode))
+    const auto hdr = tx_header(17, cfg_.master_id);
+    if (CAN_SendMessage(cfg_.hcan, &hdr, data) == CAN_SEND_FAILED)
     {
-    case Feedback: {
-        // 收到反馈即表示在线
-        watchdog_.feed();
-
-        const uint8_t state_byte = static_cast<uint8_t>(data_field >> 8);
-
-        // 解析故障状态（bits 5-0）
-        if ((state_byte & 0xC0) == 0)
-        {
-            feedback_.state = State::OK;
-        }
-        else
-        {
-            uint8_t s = state_byte;
-            for (uint8_t i = 1; i < 7; i++)
-            {
-                if (s & 0x01)
-                    feedback_.state = static_cast<State>(i);
-                s >>= 1;
-            }
-        }
-
-        // 原始反馈解析
-        // 角度：int16 → rad，范围 ±4π（约 ±12.57 rad）
-        const int16_t raw_angle  = static_cast<int16_t>((data[0] << 8 | data[1]) ^ 0x8000);
-        const int16_t raw_speed  = static_cast<int16_t>((data[2] << 8 | data[3]) ^ 0x8000);
-        const int16_t raw_torque = static_cast<int16_t>((data[4] << 8 | data[5]) ^ 0x8000);
-        const int16_t raw_temp   = static_cast<int16_t>(data[6] << 8 | data[7]);
-
-        const float angle_rad  = static_cast<float>(raw_angle) / 32768.0f * 4.0f *
-                                 3.14159265358979323846f;
-        const float speed_rps  = static_cast<float>(raw_speed) / 32768.0f * 30.0f;
-        const float torque_nm  = static_cast<float>(raw_torque) / 32768.0f * 12.0f;
-        const float temp_degc  = static_cast<float>(raw_temp) / 10.0f;
-
-        feedback_.angle       = RAD2DEG(angle_rad);
-        feedback_.velocity    = RPS2RPM(speed_rps);
-        feedback_.torque      = torque_nm;
-        feedback_.temperature = temp_degc;
-
-        // 换算到输出轴
-        abs_angle_ = sign_ * (feedback_.angle - angle_zero_) * inv_reduction_rate_;
-        velocity_  = sign_ * feedback_.velocity * inv_reduction_rate_;
-
-        feedback_count_++;
-        if (feedback_count_ == 50 && cfg_.auto_zero)
-            resetAngle();
-        break;
+        param_read_pending_ = false;
+        return false;
     }
 
-    case ReadParam: {
-        // 参数读取响应
-        const uint16_t index = static_cast<uint16_t>(data[0] | (data[1] << 8));
-
-        if (index == INDEX_MECH_POS)
+    const uint32_t wait_start = HAL_GetTick();
+    constexpr uint32_t timeout_ms = 10;
+    while ((HAL_GetTick() - wait_start) < timeout_ms)
+    {
+        if (param_read_valid_ && param_read_index_ == index)
         {
-            // data[4..7] 为 IEEE 754 float（小端），单位 rad
-            uint32_t temp = (static_cast<uint32_t>(data[7]) << 24) |
-                            (static_cast<uint32_t>(data[6]) << 16) |
-                            (static_cast<uint32_t>(data[5]) << 8) | data[4];
-            float pos_rad;
-            std::memcpy(&pos_rad, &temp, sizeof(float));
-
-            feedback_.angle = RAD2DEG(pos_rad);
-            abs_angle_ = sign_ * (feedback_.angle - angle_zero_) * inv_reduction_rate_;
+            value = param_read_value_;
+            param_read_pending_ = false;
+            return true;
         }
-        else if (index == INDEX_MECH_VEL)
-        {
-            uint32_t temp = (static_cast<uint32_t>(data[7]) << 24) |
-                            (static_cast<uint32_t>(data[6]) << 16) |
-                            (static_cast<uint32_t>(data[5]) << 8) | data[4];
-            float vel_rps;
-            std::memcpy(&vel_rps, &temp, sizeof(float));
-
-            feedback_.velocity = RPS2RPM(vel_rps);
-            velocity_ = sign_ * feedback_.velocity * inv_reduction_rate_;
-        }
-        break;
     }
 
-    default:
-        break;
-    }
+    param_read_pending_ = false;
+    return false;
 }
 
-// ---- 控制权与使能 ----
+bool MIMotor::writeParam(const uint16_t index, const float value)
+{
+    uint8_t data[8] = { static_cast<uint8_t>(index & 0xFF),
+                        static_cast<uint8_t>((index >> 8) & 0xFF),
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0 };
+    if (index == 0x7005)
+    {
+        data[4] = static_cast<uint8_t>(value);
+    }
+    else
+    {
+        write_float_le(&data[4], value);
+    }
+
+    const auto hdr = tx_header(18, cfg_.master_id);
+    return CAN_SendMessage(cfg_.hcan, &hdr, data) != CAN_SEND_FAILED;
+}
+
+// ---- 控制权 ----
 
 bool MIMotor::tryAcquireController(controllers::IController* ctrl)
 {
+    // 获取控制权时同时使能电机
     if (!enabled_)
         enable();
     return IMotor::tryAcquireController(ctrl);
@@ -337,87 +377,127 @@ bool MIMotor::tryAcquireController(controllers::IController* ctrl)
 
 void MIMotor::releaseController(controllers::IController* ctrl)
 {
+    // 交接控制权时不失能电机，保持运行状态
     IMotor::releaseController(ctrl);
 }
 
-bool MIMotor::enable()
+// ---- 反馈解码（Type 2） ----
+
+void MIMotor::decode(const uint8_t data[8], const uint16_t fault, const RunState run_state)
 {
-    // 使能序列：停止 → 设运行模式 → 使能
-    uint8_t payload[8] = {};
+    watchdog_.feed();
 
-    // 1. 停止
-    sendFrame(StopFrame, cfg_.master_id, payload);
+    const uint16_t raw_pos = read_u16_be(&data[0]);
+    const uint16_t raw_vel = read_u16_be(&data[2]);
+    const uint16_t raw_tor = read_u16_be(&data[4]);
+    const uint16_t raw_tmp = read_u16_be(&data[6]);
 
-    // 2. 设置运行模式
-    setRunMode(cfg_.run_mode);
+    const float angle_deg = pos_raw_to_deg(raw_pos);
+    const float vel_rps   = vel_raw_to_rps(raw_vel);
+    const float torque_nm = tor_raw_to_nm(raw_tor);
+    const float temp_c    = static_cast<float>(raw_tmp) / 10.0f;
 
-    // 3. 使能
-    sendFrame(EnableFrame, cfg_.master_id, payload);
+    // 多圈展开：CyberGear 位置反馈量程为 ±kPosMaxRad（约 ±2 圈），
+    // 反馈给的是量程内的单圈位置。当相邻两帧角度跳变超过 kPosHalfDeg 时，
+    // 判定为跨越量程边界，累计跨圈计数。
+    const float angle_delta = angle_deg - feedback_.angle;
+    if (angle_delta < -kPosHalfDeg)
+        feedback_.round_cnt++;
+    else if (angle_delta > kPosHalfDeg)
+        feedback_.round_cnt--;
 
-    enabled_ = true;
-    return true;
+    feedback_.angle       = angle_deg;
+    feedback_.velocity    = RPS2RPM(vel_rps);
+    feedback_.torque      = torque_nm;
+    feedback_.temperature = temp_c;
+    feedback_.run_state   = run_state;
+    feedback_.fault       = fault;
+    feedback_count_++;
+
+    // 输出轴连续角度 = 方向 × (累计圈角度 + 当前单圈角度 - 零点) × 减速比
+    abs_angle_ = sign_ *
+                 (static_cast<float>(feedback_.round_cnt) * kPosHalfDeg * 2.0f + angle_deg -
+                  angle_zero_) *
+                 inv_reduction_rate_;
+    velocity_ = sign_ * feedback_.velocity * inv_reduction_rate_;
+
+    // 上电第 50 帧自动归零
+    if (feedback_count_ == 50 && cfg_.auto_zero)
+        resetAngle();
 }
 
-bool MIMotor::disable()
+// ---- CAN 滤波器初始化 ----
+
+void MIMotor::CAN_FilterInit(CAN_HandleTypeDef* hcan, const uint32_t filter_bank)
 {
-    uint8_t payload[8] = {};
-    sendFrame(StopFrame, cfg_.master_id, payload);
-    enabled_ = false;
-    return true;
-}
-
-// ---- CAN 滤波器与回调分发 ----
-
-void MIMotor::CAN_FilterInit(CAN_HandleTypeDef* hcan,
-                             const uint32_t     filter_bank,
-                             const uint32_t     master_id)
-{
-    global_master_id_ = master_id;
-
-    CAN_FilterTypeDef filter{};
-    filter.FilterMode           = CAN_FILTERMODE_IDMASK;
-    filter.FilterScale          = CAN_FILTERSCALE_32BIT;
-    filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-    filter.FilterBank           = filter_bank;
-    filter.FilterActivation     = ENABLE;
-    filter.SlaveStartFilterBank = 14;
-
-    // STM32 32-bit 滤波器匹配扩展帧：
-    // 硬件比对值为 { EXID[28:0] << 3, IDE(1), RTR(1), 0(1) }
-    // ID[7:0] 映射到 EXID[7:0]，对应 filter 位[10:3]
-    // 匹配条件：EXID[7:0] == master_id, IDE == 1, RTR == 0
-    filter.FilterIdHigh     = 0;
-    filter.FilterIdLow      = static_cast<uint16_t>((master_id << 3) | (1 << 2));
-    filter.FilterMaskIdHigh = 0;
-    filter.FilterMaskIdLow  = static_cast<uint16_t>(0x7F8 | (1 << 2) | (1 << 1));
+    const CAN_FilterTypeDef filter = {
+        .FilterIdHigh         = 0x0000,
+        .FilterIdLow          = 0x0000 | CAN_ID_EXT,
+        .FilterMaskIdHigh     = 0x0000,
+        .FilterMaskIdLow      = 0x0000 | CAN_ID_EXT,
+        .FilterFIFOAssignment = CAN_FILTER_FIFO0,
+        .FilterBank           = filter_bank,
+        .FilterMode           = CAN_FILTERMODE_IDMASK,
+        .FilterScale          = CAN_FILTERSCALE_32BIT,
+        .FilterActivation     = ENABLE,
+        .SlaveStartFilterBank = 14,
+    };
 
     if (HAL_CAN_ConfigFilter(hcan, &filter) != HAL_OK)
         Error_Handler();
 }
 
+// ---- CAN 接收分发 ----
+
 void MIMotor::CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
                                      const CAN_RxHeaderTypeDef* header,
                                      const uint8_t*             data)
 {
-    if (!hcan || !header || !data)
-        return;
-    if (header->IDE != CAN_ID_EXT)
+    if (!hcan || !header || !data || header->IDE != CAN_ID_EXT || header->DLC < 8)
         return;
 
     const auto m = find_map(hcan);
     if (!m)
         return;
 
-    // 从扩展 ID data 字段低字节提取电机 ID
-    const uint16_t data_field = getExtIdData(header->ExtId);
-    const uint8_t  motor_id  = data_field & 0xFF;
+    // 发送时电机 ID 在 bit7~0；反馈时电机把自身 ID 放在 bit15~8
+    const uint8_t id    = static_cast<uint8_t>((header->ExtId >> 8) & 0xFF);
+    const auto    motor = m->motors.find(id);
+    if (!motor)
+        return;
 
-    auto motor = m->motors.find(motor_id);
-    if (motor != nullptr)
-        motor->decode(header, data);
+    const uint8_t comm_type = static_cast<uint8_t>((header->ExtId >> 24) & 0x1F);
+
+    // 仅处理 Type 2 反馈帧
+    if (comm_type == 2)
+    {
+        const uint16_t fault =
+                static_cast<uint16_t>((header->ExtId >> 16) & 0x3F);
+        const auto run_state =
+                static_cast<RunState>((header->ExtId >> 22) & 0x3);
+        motor->decode(data, fault, run_state);
+    }
+    else if (comm_type == 17 && motor->param_read_pending_)
+    {
+        const uint16_t index = read_u16_le(&data[0]);
+        if (index != motor->param_read_index_)
+            return;
+
+        if (index == 0x7005)
+        {
+            motor->param_read_value_ = static_cast<float>(data[4]);
+        }
+        else
+        {
+            float value = 0.0f;
+            std::memcpy(&value, &data[4], sizeof(float));
+            motor->param_read_value_ = value;
+        }
+        motor->param_read_valid_ = true;
+    }
 }
 
-// ---- HAL FIFO 回调包装 ----
+// ---- HAL FIFO 中断回调包装 ----
 
 extern "C" void MI_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
 {

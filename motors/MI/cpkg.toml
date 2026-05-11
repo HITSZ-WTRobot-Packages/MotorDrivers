@@ -1,5 +1,5 @@
 format_version = 1
 name = "MIMotor"
 pkgname = "MotorDrivers::MIMotor"
-version = "0.1.0"
-dependencies = ["MotorDrivers::Core", "bsp::CANDriver"]
+version = "0.2.0"
+dependencies = ["MotorDrivers::Core", "services::Watchdog", "libs::FixedMap"]
