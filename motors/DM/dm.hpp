@@ -113,6 +113,11 @@ public:
      */
     [[nodiscard]] float getVelocity() const override { return velocity_; }
     /**
+     * @brief 获取反馈力矩
+     * @return 力矩，单位 Nm
+     */
+    [[nodiscard]] float getTorque() const { return feedback_.torque; }
+    /**
      * @brief 把当前输出角度设置为零点
      */
     void resetAngle() override;
