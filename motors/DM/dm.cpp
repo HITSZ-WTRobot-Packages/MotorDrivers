@@ -212,7 +212,7 @@ void DMMotor::setCurrent(const float current)
 void DMMotor::setInternalVelocity(const float rpm)
 {
     // 库设计上对外统一使用 rpm；DM 协议实际发送的是 rad/s 的 float。
-    const float rps  = sign_ * RPM2RPS(rpm);
+    const float rps  = sign_ * RPM2RPS(rpm) / cfg_.reduction_rate / get_inv_vel_reduction_rate(cfg_.type);
     const auto  data = reinterpret_cast<const uint8_t*>(&rps);
 
     const auto hdr = tx_header(4);
@@ -222,8 +222,8 @@ void DMMotor::setInternalVelocity(const float rpm)
 void DMMotor::setInternalPosition(float pos)
 {
     // 当前接口位置参考使用 deg；DM 协议里要传 rad。
-    pos = sign_ * DEG2RAD(pos);
-
+    
+    pos = sign_ * DEG2RAD(pos) / cfg_.reduction_rate / get_inv_pos_reduction_rate(cfg_.type);
     uint8_t data[8];
     memcpy(data, &pos, sizeof(float));
     memcpy(data + 4, &cfg_.vel_max_rad, sizeof(float));
