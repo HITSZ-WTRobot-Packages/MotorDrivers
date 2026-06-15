@@ -63,8 +63,12 @@ public:
     /**
      * @brief 设置位置参考
      * @param position 目标输出轴角度，单位 deg
+     * @param max_velocity 位置环输出的最大目标角速度限制；
+     *                     传 kNoLimit（默认）表示不施加额外限制
      */
-    void setRef(float position);
+    void setRef(float position, float max_velocity = kNoLimit);
+
+    static constexpr float kNoLimit = motors::IMotor::kNoLimit;
 
 private:
     PIDMotor position_pid_; ///< 外层位置环
@@ -73,6 +77,8 @@ private:
     uint32_t pos_vel_prescaler_ = 0; ///< 位置环分频计数器
 
     float position_ref_ = 0.0f; ///< 当前位置参考，单位 deg
+
+    float max_velocity_ = kNoLimit; ///< 位置环输出速度限幅
 
     uint32_t pos_vel_freq_ratio_; ///< 位置环相对 update 的分频比
 

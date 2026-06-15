@@ -153,21 +153,31 @@ public:
      */
     void setCurrent(float current) override;
 
-    [[nodiscard]] bool supportsInternalVelocity() const override { return cfg_.mode == Mode::Vel; }
+    [[nodiscard]] InternalVelocitySupportLevel internalVelocitySupportLevel() const override
+    {
+        return cfg_.mode == Mode::Vel ? InternalVelocitySupportLevel::RefOnly
+                                      : InternalVelocitySupportLevel::NotSupported;
+    }
     /**
      * @brief 发送内部速度参考
      *
      * 库设计上对外统一使用 rpm；DM 驱动内部会把它换算成协议要求的 rad/s。
+     * DM 速度模式协议不支持 maxi，该参数被忽略。
      */
-    void setInternalVelocity(float rpm) override;
+    void setInternalVelocity(float rpm, float maxi) override;
 
-    [[nodiscard]] bool supportsInternalPosition() const override { return cfg_.mode == Mode::Pos; }
+    [[nodiscard]] InternalPositionSupportLevel internalPositionSupportLevel() const override
+    {
+        return cfg_.mode == Mode::Pos ? InternalPositionSupportLevel::RefAndMaxv
+                                      : InternalPositionSupportLevel::NotSupported;
+    }
     /**
      * @brief 发送内部位置参考
      *
      * 当前位置参考使用 deg；DM 协议内部会换算成 rad。
+     * maxv 单位 rpm，传 kNoLimit 时回退到 cfg_.vel_max_rad。
      */
-    void setInternalPosition(float pos) override;
+    void setInternalPosition(float pos, float maxv) override;
 
     [[nodiscard]] bool supportsInternalMIT() const override { return cfg_.mode == Mode::MIT; }
     /**

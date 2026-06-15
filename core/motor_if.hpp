@@ -23,6 +23,7 @@
 #ifndef I_MOTOR_HPP
 #define I_MOTOR_HPP
 #include <cassert>
+#include <limits>
 
 namespace motors
 {
@@ -120,24 +121,63 @@ public:
     virtual void setCurrent(const float current) { (void)current; }
 
     /**
-     * @brief 是否支持内部速度控制
+     * 内部速度控制能力等级
      */
-    [[nodiscard]] virtual bool supportsInternalVelocity() const { return false; }
-    /**
-     * @brief 向驱动器发送内部速度指令
-     * @param rpm 速度参考；默认单位 rpm，除非变量名或驱动注释明确说明
-     */
-    virtual void setInternalVelocity(const float rpm) { (void)rpm; }
+    enum class InternalVelocitySupportLevel
+    {
+        NotSupported, /// 不支持该控制模式
+        RefOnly,      /// 只支持设置目标速度
+        RefAndMaxi,   /// 支持设置目标速度和最大电流/力矩
+    };
 
     /**
-     * @brief 是否支持内部位置控制
+     * @brief 查询内部速度模式支持等级
      */
-    [[nodiscard]] virtual bool supportsInternalPosition() const { return false; }
+    [[nodiscard]] virtual InternalVelocitySupportLevel internalVelocitySupportLevel() const
+    {
+        return InternalVelocitySupportLevel::NotSupported;
+    }
+
+    /**
+     * @brief 向驱动器发送内部速度指令
+     * @param rpm 速度参考；默认单位 rpm
+     * @param maxi 最大电流/力矩限制，传 kNoLimit 表示不限制；
+     *             不支持 maxi 的电机会忽略该参数
+     */
+    virtual void setInternalVelocity(const float rpm, const float maxi)
+    {
+        (void)rpm;
+        (void)maxi;
+    }
+
+    /**
+     * 内部位置模式能力等级
+     */
+    enum class InternalPositionSupportLevel
+    {
+        NotSupported,
+        RefOnly,
+        RefAndMaxv,
+    };
+
+    /**
+     * @brief 查询内部位置模式支持等级
+     */
+    [[nodiscard]] virtual InternalPositionSupportLevel internalPositionSupportLevel() const
+    {
+        return InternalPositionSupportLevel::NotSupported;
+    }
     /**
      * @brief 向驱动器发送内部位置指令
      * @param pos 位置参考，默认单位 deg
+     * @param maxv 最大速度限制，单位 rpm，传 kNoLimit 表示不限制；
+     *             不支持 maxv 的电机会忽略该参数
      */
-    virtual void setInternalPosition(const float pos) { (void)pos; }
+    virtual void setInternalPosition(const float pos, const float maxv)
+    {
+        (void)pos;
+        (void)maxv;
+    }
 
     /**
      * @brief 是否支持 MIT 控制格式
@@ -182,6 +222,8 @@ public:
      * @brief 当前持有该电机控制权的控制器
      */
     [[nodiscard]] controllers::IController* currentController() const { return controller_; }
+
+    static constexpr float kNoLimit = std::numeric_limits<float>::max();
 
 private:
     controllers::IController* controller_; ///< 当前持有控制权的控制器
@@ -282,17 +324,20 @@ protected:
                 break;
             case ControlMode::InternalVel:
                 // 我们充分相信用户能决定好控制模式，如果用户决定的不对，就应该报错，而不是兼容
-                assert(motor_->supportsInternalVelocity());
+                assert(motor_->internalVelocitySupportLevel() !=
+                       motors::IMotor::InternalVelocitySupportLevel::NotSupported);
                 ctrl_mode_ = ControlMode::InternalVel;
                 break;
             case ControlMode::InternalVelPos:
                 // TODO: fixbug: 按当前语义，InternalVelPos 应同时要求支持速度指令和位置指令；
                 // 这里暂时只检查了位置能力，按要求先补注释，不改原逻辑。
-                assert(motor_->supportsInternalPosition());
+                assert(motor_->internalPositionSupportLevel() !=
+                       motors::IMotor::InternalPositionSupportLevel::NotSupported);
                 ctrl_mode_ = ControlMode::InternalVelPos;
                 break;
             case ControlMode::InternalPos:
-                assert(motor_->supportsInternalPosition());
+                assert(motor_->internalPositionSupportLevel() !=
+                       motors::IMotor::InternalPositionSupportLevel::NotSupported);
                 ctrl_mode_ = ControlMode::InternalPos;
                 break;
             case ControlMode::InternalMIT:

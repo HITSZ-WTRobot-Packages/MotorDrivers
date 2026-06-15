@@ -5,6 +5,7 @@
  * @brief   通用位置控制器实现
  */
 #include "motor_pos_controller.hpp"
+#include <algorithm>
 
 namespace controllers
 {
@@ -32,7 +33,7 @@ void MotorPosController::update()
         ++internal_set_prescaler_;
         if (internal_set_prescaler_ >= internal_set_ratio_)
         {
-            motor_->setInternalPosition(position_ref_);
+            motor_->setInternalPosition(position_ref_, max_velocity_);
             internal_set_prescaler_ = 0;
         }
         return;
@@ -49,7 +50,10 @@ void MotorPosController::update()
         // 如果电机内部有速度环，这里直接把位置环输出作为速度参考交给驱动器。
         if (ctrl_mode_ == ControlMode::InternalVel)
         {
-            motor_->setInternalVelocity(position_pid_.getOutput());
+            float vel_ref = position_pid_.getOutput();
+            if (max_velocity_ != kNoLimit)
+                vel_ref = std::clamp(vel_ref, -max_velocity_, max_velocity_);
+            motor_->setInternalVelocity(vel_ref, kNoLimit);
         }
 
         pos_vel_prescaler_ = 0;
@@ -61,20 +65,25 @@ void MotorPosController::update()
     }
 
     // 外部串级模式：位置环先给出目标角速度，速度环再根据当前速度算出电流 / 力矩输出。
-    const float output = velocity_pid_.calc(position_pid_.getOutput(), motor_->getVelocity());
+    float vel_ref = position_pid_.getOutput();
+    if (max_velocity_ != kNoLimit)
+        vel_ref = std::clamp(vel_ref, -max_velocity_, max_velocity_);
+
+    const float output = velocity_pid_.calc(vel_ref, motor_->getVelocity());
 
     motor_->setCurrent(output);
 }
 
-void MotorPosController::setRef(const float position)
+void MotorPosController::setRef(const float position, const float max_velocity)
 {
+    max_velocity_ = max_velocity;
     position_ref_ = position;
 
     // InternalPos / InternalVelPos 下，改参考值后立即补发一次位置指令，减少响应延迟。
     if (ctrl_mode_ == ControlMode::InternalVelPos || ctrl_mode_ == ControlMode::InternalPos)
     {
         if (motor_)
-            motor_->setInternalPosition(position_ref_);
+            motor_->setInternalPosition(position_ref_, max_velocity_);
     }
 }
 
