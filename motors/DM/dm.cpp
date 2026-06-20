@@ -332,19 +332,24 @@ void DMMotor::releaseController(controllers::IController* ctrl)
 }
 bool DMMotor::enable()
 {
-    const auto hdr = tx_header(8);
-    if (CAN_SendMessage(cfg_.hcan, &hdr, ENABLE_MSG) == CAN_SEND_FAILED)
-        return false;
+    sendEnableFrame();
     enabled_ = true;
     return true;
 }
-bool DMMotor::disable()
+void DMMotor::disable()
+{
+    sendDisableFrame();
+    enabled_ = false;
+}
+void DMMotor::sendEnableFrame() const
 {
     const auto hdr = tx_header(8);
-    if (CAN_SendMessage(cfg_.hcan, &hdr, DISABLE_MSG) == CAN_SEND_FAILED)
-        return false;
-    enabled_ = false;
-    return true;
+    CAN_SendMessage(cfg_.hcan, &hdr, ENABLE_MSG);
+}
+void DMMotor::sendDisableFrame() const
+{
+    const auto hdr = tx_header(8);
+    CAN_SendMessage(cfg_.hcan, &hdr, DISABLE_MSG);
 }
 
 CAN_TxHeaderTypeDef DMMotor::tx_header(const uint8_t& DLC) const

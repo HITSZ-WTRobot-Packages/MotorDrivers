@@ -84,17 +84,17 @@ public:
      */
     struct Config
     {
-        CAN_HandleTypeDef* hcan; ///< 所在 CAN 总线
-        uint8_t            id0;  ///< 电调 ID，仅低 4 位有效，建议从 0x09 到 0x0F
-        Type               type; ///< 电机类型
-        Mode               mode; ///< 驱动器控制模式，需要和上位机配置一致
+        CAN_HandleTypeDef* hcan;        ///< 所在 CAN 总线
+        uint8_t            id0;         ///< 电调 ID，仅低 4 位有效，建议从 0x09 到 0x0F
+        Type               type;        ///< 电机类型
+        Mode               mode;        ///< 驱动器控制模式，需要和上位机配置一致
         float              pos_max_rad; ///< 驱动器配置的位置最大值，单位 rad
         float              vel_max_rad; ///< 驱动器配置的速度最大值，单位 rad/s
         float              tor_max;     ///< 驱动器配置的力矩最大值，单位 Nm
 
         float default_angle_zero = 0; ///< 默认电机零点，理解为零点时电机编码器返回的角度
 
-        bool auto_zero = false; ///< 上电收够一段稳定反馈后，是否自动把当前角度设为零点
+        bool  auto_zero      = false; ///< 上电收够一段稳定反馈后，是否自动把当前角度设为零点
         bool  reverse        = false; ///< 是否反转输出方向
         float reduction_rate = 1.0f;  ///< 外接减速比
     };
@@ -231,16 +231,20 @@ public:
      * @brief 发送失能报文
      * @return 是否发送成功
      */
-    bool disable();
-    void ping()
+    void disable();
+
+    void sendEnableFrame() const;
+    void sendDisableFrame() const;
+
+    void ping() const
     {
         // DM 是“一收一回”模式，未使能时库内有意使用失能包代替心跳包。
         // 这样既能维持通信，又不会误使能电机。
         if (!enabled_)
-            disable();
+            sendDisableFrame();
         // 如果电机实际未使能，持续发送使能帧
         if (enabled_ && feedback_.state == State::Disabled)
-            enable();
+            sendEnableFrame();
     }
 
     /**
