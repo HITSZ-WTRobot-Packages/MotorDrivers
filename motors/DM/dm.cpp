@@ -209,24 +209,27 @@ void DMMotor::setCurrent(const float current)
     setInternalMIT(current, 0, 0, 0, 0);
 }
 
-void DMMotor::setInternalVelocity(const float rpm)
+void DMMotor::setInternalVelocity(const float rpm, const float maxi)
 {
-    // 库设计上对外统一使用 rpm；DM 协议实际发送的是 rad/s 的 float。
-    const float rps  = sign_ * RPM2RPS(rpm) / cfg_.reduction_rate / get_inv_vel_reduction_rate(cfg_.type);
-    const auto  data = reinterpret_cast<const uint8_t*>(&rps);
+    (void)maxi; // DM 速度模式协议不支持 maxi
+    const float rps = sign_ * RPM2RPS(rpm) * cfg_.reduction_rate /
+                      get_inv_vel_reduction_rate(cfg_.type);
+    const auto data = reinterpret_cast<const uint8_t*>(&rps);
 
     const auto hdr = tx_header(4);
     CAN_SendMessage(cfg_.hcan, &hdr, data);
 }
 
-void DMMotor::setInternalPosition(float pos)
+void DMMotor::setInternalPosition(float pos, const float maxv)
 {
-    // 当前接口位置参考使用 deg；DM 协议里要传 rad。
-    
-    pos = sign_ * DEG2RAD(pos) / cfg_.reduction_rate / get_inv_pos_reduction_rate(cfg_.type);
+    pos = sign_ * DEG2RAD(pos) * cfg_.reduction_rate / get_inv_pos_reduction_rate(cfg_.type);
+
+    const float vel_limit_rps =
+            std::clamp(RPM2RPS(std::fabsf(maxv)), 0.0f, cfg_.vel_max_rad / cfg_.reduction_rate);
+
     uint8_t data[8];
     memcpy(data, &pos, sizeof(float));
-    memcpy(data + 4, &cfg_.vel_max_rad, sizeof(float));
+    memcpy(data + 4, &vel_limit_rps, sizeof(float));
 
     const auto hdr = tx_header(8);
     CAN_SendMessage(cfg_.hcan, &hdr, data);

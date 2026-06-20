@@ -162,15 +162,24 @@ public:
     [[nodiscard]] bool supportsCurrent() const override { return true; }
     void               setCurrent(float current) override;
 
-    [[nodiscard]] bool supportsInternalVelocity() const override { return true; }
-    void               setInternalVelocity(float rpm) override;
+    [[nodiscard]] InternalVelocitySupportLevel internalVelocitySupportLevel() const override
+    {
+        return InternalVelocitySupportLevel::RefOnly;
+    }
+    /**
+     * @brief 发送内部速度参考
+     *
+     * VESC 内部速度模式不支持 maxi，该参数被忽略。
+     */
+    void setInternalVelocity(float rpm, float maxi) override;
 
     /**
      * @brief 是否支持内部位置控制
      *
      * 协议本身存在位置设定命令，但当前这个类没有把它作为稳定接口对外开放。
+     *
+     * 不重写 internalPositionSupportLevel()，继承基类默认 NotSupported。
      */
-    [[nodiscard]] bool supportsInternalPosition() const override { return false; }
 
     /**
      * @brief 初始化 CAN 滤波器

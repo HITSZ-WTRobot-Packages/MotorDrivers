@@ -62,17 +62,23 @@ public:
     /**
      * @brief 设置速度参考
      * @param velocity 目标输出轴速度，单位 rpm
+     * @param max_current 外部 PID 模式下临时电流/力矩输出上限；
+     *                   传 kNoLimit（默认）表示不施加额外限制
      */
-    void setRef(float velocity);
+    void setRef(float velocity, float max_current = kNoLimit);
 
     /**
      * @brief 直接访问内部 PID 对象
      */
     auto& getPID() { return pid_; }
 
+    static constexpr float kNoLimit = motors::IMotor::kNoLimit;
+
 private:
     PIDMotor pid_;                    ///< 速度环 PID
     float    velocity_target_ = 0.0f; ///< 目标速度，默认单位 rpm
+
+    float max_current_ = kNoLimit; ///< 电流/力矩输出限幅
 
     size_t internal_set_prescaler_ = 0; ///< 内部速度指令发送分频计数器
     size_t internal_set_ratio_;         ///< 内部速度指令发送分频比

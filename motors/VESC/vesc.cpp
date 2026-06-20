@@ -180,8 +180,9 @@ void VESCMotor::setCurrent(const float current)
     sendSetCommand(SetCommand::SetCurrent, current);
 }
 
-void VESCMotor::setInternalVelocity(const float rpm)
+void VESCMotor::setInternalVelocity(const float rpm, const float maxi)
 {
+    (void)maxi;
     sendSetCommand(SetCommand::SetRPM, rpm);
 }
 
