@@ -1,0 +1,16 @@
+name: Update package documentation
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  documentation:
+    name: Request documentation synchronization
+    uses: HITSZ-WTRobot-Packages/docs/.github/workflows/request-docs-sync.yml@main
+    secrets:
+      DOCS_SYNC_TOKEN: ${{ secrets.DOCS_SYNC_TOKEN }}
+
