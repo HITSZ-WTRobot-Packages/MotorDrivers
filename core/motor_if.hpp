@@ -206,7 +206,7 @@ public:
             controller_ = ctrl;
             return true;
         }
-        return controller_ == ctrl; // re-acquire allowed
+        return controller_ == ctrl; // re-acquire allowed，允许同一个控制器重复申请
     }
 
     /**
@@ -329,10 +329,10 @@ protected:
                 ctrl_mode_ = ControlMode::InternalVel;
                 break;
             case ControlMode::InternalVelPos:
-                // TODO: fixbug: 按当前语义，InternalVelPos 应同时要求支持速度指令和位置指令；
-                // 这里暂时只检查了位置能力，按要求先补注释，不改原逻辑。
                 assert(motor_->internalPositionSupportLevel() !=
                        motors::IMotor::InternalPositionSupportLevel::NotSupported);
+                assert(motor_->internalVelocitySupportLevel() !=
+                       motors::IMotor::InternalVelocitySupportLevel::NotSupported);
                 ctrl_mode_ = ControlMode::InternalVelPos;
                 break;
             case ControlMode::InternalPos:
