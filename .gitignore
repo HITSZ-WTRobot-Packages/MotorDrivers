@@ -39,3 +39,6 @@
 
 # debug information files
 *.dwo
+
+# cpkg-generated build files (generated from cpkg.toml, do not commit)
+CMakeLists.txt
