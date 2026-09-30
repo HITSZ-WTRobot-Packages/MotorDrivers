@@ -38,7 +38,7 @@ void MotorVelController::update()
     }
 
     // 外部 PID 模式：根据当前速度反馈算出电流 / 力矩类输出。
-    float output = pid_.calc(velocity_target_, motor_->getVelocity());
+    float output = pid_.calc(velocity_target_, motor_->getVelocity(), ff_);
 
     if (max_current_ != kNoLimit)
         output = std::clamp(output, -max_current_, max_current_);
@@ -46,10 +46,11 @@ void MotorVelController::update()
     motor_->setCurrent(output);
 }
 
-void MotorVelController::setRef(const float velocity, const float max_current)
+void MotorVelController::setRef(const float velocity, const float max_current, const float ff)
 {
     max_current_     = max_current;
     velocity_target_ = velocity;
+    ff_              = ff;
 
     // 内部速度模式下，改参考值后立即发送一次，减少等待下个周期的迟滞。
     if (ctrl_mode_ == ControlMode::InternalVel || ctrl_mode_ == ControlMode::InternalVelPos)
