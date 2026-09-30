@@ -64,8 +64,9 @@ public:
      * @param velocity 目标输出轴速度，单位 rpm
      * @param max_current 外部 PID 模式下临时电流/力矩输出上限；
      *                   传 kNoLimit（默认）表示不施加额外限制
+     * @param ff  前馈输入,使用者应该根据实际情况自己计算前馈值，直接传入该函数
      */
-    void setRef(float velocity, float max_current = kNoLimit);
+    void setRef(float velocity, float max_current = kNoLimit, float ff = 0.0f);
 
     /**
      * @brief 直接访问内部 PID 对象
@@ -77,6 +78,7 @@ public:
 private:
     PIDMotor pid_;                    ///< 速度环 PID
     float    velocity_target_ = 0.0f; ///< 目标速度，默认单位 rpm
+    float    ff_              = 0.0f; ///< 前馈输入
 
     float max_current_ = kNoLimit; ///< 电流/力矩输出限幅
 
