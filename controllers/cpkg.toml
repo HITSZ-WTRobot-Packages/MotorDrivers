@@ -1,4 +1,4 @@
 name = "Controller"
 pkgname = "MotorDrivers::Controller"
 version = "0.1.0"
-dependencies = ["MotorDrivers::Core", "libs::PIDMotor"]
+dependencies = ["MotorDrivers::Core", "libs::PIDMotor", "libs::MIT_PD"]
