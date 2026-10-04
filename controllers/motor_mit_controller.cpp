@@ -18,7 +18,8 @@ namespace controllers
 MotorMITController::MotorMITController(motors::IMotor* motor, const Config& cfg) :
     IController(motor, cfg.ctrl_mode),
     mit_(MITPD::Config{cfg.mit.Kp, cfg.mit.Kd, std::fabs(cfg.mit.abs_output_max)}),
-    mit_cfg_(cfg.mit),
+    kp_(cfg.mit.Kp),
+    kd_(cfg.mit.Kd),
     internal_set_ratio_(std::max(uint32_t{1}, cfg.internal_set_ratio))
 {
 }
@@ -69,7 +70,7 @@ void MotorMITController::update()
     {
         if (++internal_set_prescaler_ >= internal_set_ratio_)
         {
-            motor_->setInternalMIT(t_ff_, position_ref_, velocity_ref_, mit_cfg_.Kp, mit_cfg_.Kd);
+            motor_->setInternalMIT(t_ff_, position_ref_, velocity_ref_, kp_, kd_);
             internal_set_prescaler_ = 0;
         }
         return;
@@ -89,22 +90,18 @@ void MotorMITController::update()
 void MotorMITController::setRef(const float position_deg, const float velocity_degs,
                                 const float max_current, const float t_ff)
 {
-    setRefDeferred(position_deg, velocity_degs, max_current, t_ff);
-
-    // 内部MIT模式下，改参考值后立即发送一次，减少等待下个周期的迟滞。
-    if (enabled() && motor_ && ctrl_mode_ == ControlMode::InternalMIT)
-    {
-        motor_->setInternalMIT(t_ff_, position_ref_, velocity_ref_, mit_cfg_.Kp, mit_cfg_.Kd);
-        internal_set_prescaler_ = 0;
-    }
-}
-
-void MotorMITController::setRefDeferred(const float position_deg, const float velocity_degs,
-                                       const float max_current, const float t_ff)
-{
     position_ref_ = position_deg;
     velocity_ref_ = velocity_degs;
     max_current_ = std::fabs(max_current);
     t_ff_ = t_ff;
+
+
+    // 内部MIT模式下，改参考值后立即发送一次，减少等待下个周期的迟滞。
+    if (enabled() && motor_ && ctrl_mode_ == ControlMode::InternalMIT)
+    {
+        motor_->setInternalMIT(t_ff_, position_ref_, velocity_ref_, kp_, kd_);
+        internal_set_prescaler_ = 0;
+    }
 }
+
 } // namespace controllers

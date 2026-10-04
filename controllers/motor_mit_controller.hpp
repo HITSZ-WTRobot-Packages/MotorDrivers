@@ -54,18 +54,12 @@ public:
     void setRef(float position_deg, float velocity_degs,
                 float max_current = kNoLimit, float t_ff = 0.0f);
 
-    /** Save a trajectory sample without sending immediately.
-     * update() sends according to internal_set_ratio; units match setRef().
-     * This prevents high-rate trajectory samples from bypassing CAN prescaling.
-     */
-    void setRefDeferred(float position_deg, float velocity_degs,
-                        float max_current = kNoLimit, float t_ff = 0.0f);
-
     static constexpr float kNoLimit = motors::IMotor::kNoLimit;
 
 private:
     MITPD mit_;
-    const MITPD::Config mit_cfg_; ///< 构造时固定，内部发送使用其中的增益
+    float kp_;
+    float kd_;
     float position_ref_ = 0.0f;
     float velocity_ref_ = 0.0f;
     float max_current_ = kNoLimit;
