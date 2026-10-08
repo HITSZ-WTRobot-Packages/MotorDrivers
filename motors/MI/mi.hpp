@@ -115,8 +115,8 @@ public:
 
     [[nodiscard]] float getAngle() const override { return abs_angle_; }
     [[nodiscard]] float getVelocity() const override { return velocity_; }
-    void               resetAngle() override;
-    [[nodiscard]] bool isConnected() const override { return watchdog_.isFed(); }
+    void                resetAngle() override;
+    [[nodiscard]] bool  isConnected() const override { return watchdog_.isFed(); }
 
     // ---- IMotor 控制能力声明 ----
 
@@ -229,7 +229,8 @@ public:
                                        const uint8_t*             data);
 
     // ---- 协议常量（mi.cpp 换算函数需要引用） ----
-    static constexpr float kPosMaxRad = 12.5f;  ///< 位置量程，单位 rad（对应 P_MIN=-12.5, P_MAX=12.5）
+    static constexpr float kPosMaxRad = 12.5f;  ///< 位置量程，单位 rad（对应 P_MIN=-12.5,
+                                                ///< P_MAX=12.5）
     static constexpr float kVelMaxRps = 30.0f;  ///< 速度量程，单位 rad/s
     static constexpr float kTorqueMax = 12.0f;  ///< 力矩量程，单位 Nm
     static constexpr float kKpMax     = 500.0f; ///< Kp 量程
@@ -263,7 +264,7 @@ private:
     float         param_read_value_   = 0.0f;
 
     service::Watchdog watchdog_;
-    uint32_t           feedback_count_ = 0; ///< 反馈计数，用于上电自动归零
+    uint32_t          feedback_count_ = 0; ///< 反馈计数，用于上电自动归零
 
     struct Feedback
     {
@@ -277,29 +278,11 @@ private:
         int32_t round_cnt{ 0 }; ///< 跨圈累计，用于展开成连续角度
     } feedback_{};
 
-    float angle_zero_        = 0.0f; ///< 零点角度，单位 deg
-    float abs_angle_         = 0.0f; ///< 输出轴绝对角度，单位 deg
-    float velocity_          = 0.0f; ///< 输出轴速度，单位 rpm
-    float inv_reduction_rate_;       ///< 外接减速比倒数
-    float sign_;                     ///< 方向符号，正转为 1，反转为 -1
+    float angle_zero_ = 0.0f;  ///< 零点角度，单位 deg
+    float abs_angle_  = 0.0f;  ///< 输出轴绝对角度，单位 deg
+    float velocity_   = 0.0f;  ///< 输出轴速度，单位 rpm
+    float inv_reduction_rate_; ///< 外接减速比倒数
+    float sign_;               ///< 方向符号，正转为 1，反转为 -1
 };
 
 } // namespace motors
-
-extern "C"
-{
-/**
- * @brief MI FIFO0 中断回调包装
- *
- * 如果项目没有统一 CAN 分发器，可直接使用此 HAL 包装；
- * 否则推荐统一把报文分发到 CANBaseReceiveCallback()。
- */
-void MI_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan);
-/**
- * @brief MI FIFO1 中断回调包装
- *
- * 如果项目没有统一 CAN 分发器，可直接使用此 HAL 包装；
- * 否则推荐统一把报文分发到 CANBaseReceiveCallback()。
- */
-void MI_CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan);
-}

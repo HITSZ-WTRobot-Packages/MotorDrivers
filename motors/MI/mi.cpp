@@ -240,7 +240,7 @@ CAN_TxHeaderTypeDef MIMotor::tx_header(const uint8_t comm_type, const uint16_t d
 bool MIMotor::sendEnableDisable(const uint8_t comm_type, const uint8_t data0)
 {
     uint8_t    data[8] = { data0, 0, 0, 0, 0, 0, 0, 0 };
-    const auto hdr      = tx_header(comm_type, cfg_.master_id);
+    const auto hdr     = tx_header(comm_type, cfg_.master_id);
     return CAN_SendMessage(cfg_.hcan, &hdr, data) != CAN_SEND_FAILED;
 }
 
@@ -307,14 +307,14 @@ void MIMotor::setCurrent(const float current)
 
 bool MIMotor::readParam(const uint16_t index, float& value)
 {
-    uint8_t data[8] = { static_cast<uint8_t>(index & 0xFF),
-                        static_cast<uint8_t>((index >> 8) & 0xFF),
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0 };
+    uint8_t data[8]     = { static_cast<uint8_t>(index & 0xFF),
+                            static_cast<uint8_t>((index >> 8) & 0xFF),
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0 };
     param_read_valid_   = false;
     param_read_pending_ = true;
     param_read_index_   = index;
@@ -326,13 +326,13 @@ bool MIMotor::readParam(const uint16_t index, float& value)
         return false;
     }
 
-    const uint32_t wait_start = HAL_GetTick();
+    const uint32_t     wait_start = HAL_GetTick();
     constexpr uint32_t timeout_ms = 10;
     while ((HAL_GetTick() - wait_start) < timeout_ms)
     {
         if (param_read_valid_ && param_read_index_ == index)
         {
-            value = param_read_value_;
+            value               = param_read_value_;
             param_read_pending_ = false;
             return true;
         }
@@ -471,10 +471,8 @@ void MIMotor::CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
     // 仅处理 Type 2 反馈帧
     if (comm_type == 2)
     {
-        const uint16_t fault =
-                static_cast<uint16_t>((header->ExtId >> 16) & 0x3F);
-        const auto run_state =
-                static_cast<RunState>((header->ExtId >> 22) & 0x3);
+        const uint16_t fault     = static_cast<uint16_t>((header->ExtId >> 16) & 0x3F);
+        const auto     run_state = static_cast<RunState>((header->ExtId >> 22) & 0x3);
         motor->decode(data, fault, run_state);
     }
     else if (comm_type == 17 && motor->param_read_pending_)
@@ -495,38 +493,6 @@ void MIMotor::CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
         }
         motor->param_read_valid_ = true;
     }
-}
-
-// ---- HAL FIFO 中断回调包装 ----
-
-extern "C" void MI_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
-{
-    do
-    {
-        CAN_RxHeaderTypeDef header;
-        uint8_t             data[8];
-        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) != HAL_OK)
-        {
-            Error_Handler();
-            return;
-        }
-        MIMotor::CANBaseReceiveCallback(hcan, &header, data);
-    } while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0);
-}
-
-extern "C" void MI_CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan)
-{
-    do
-    {
-        CAN_RxHeaderTypeDef header;
-        uint8_t             data[8];
-        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &header, data) != HAL_OK)
-        {
-            Error_Handler();
-            return;
-        }
-        MIMotor::CANBaseReceiveCallback(hcan, &header, data);
-    } while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO1) > 0);
 }
 
 } // namespace motors

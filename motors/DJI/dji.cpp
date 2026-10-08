@@ -274,36 +274,4 @@ void DJIMotor::CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
         motor->decode(data);
 }
 
-extern "C" void DJI_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
-{
-    // FIFO 里可能一次堆了多帧，这里用 do-while 全部取完，避免漏帧。
-    do
-    {
-        CAN_RxHeaderTypeDef header;
-        uint8_t             data[8];
-        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) != HAL_OK)
-        {
-            Error_Handler();
-            return;
-        }
-        DJIMotor::CANBaseReceiveCallback(hcan, &header, data);
-    } while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0);
-}
-
-extern "C" void DJI_CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan)
-{
-    // FIFO1 的处理逻辑与 FIFO0 相同，只是读取的硬件 FIFO 不同。
-    do
-    {
-        CAN_RxHeaderTypeDef header;
-        uint8_t             data[8];
-        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &header, data) != HAL_OK)
-        {
-            Error_Handler();
-            return;
-        }
-        DJIMotor::CANBaseReceiveCallback(hcan, &header, data);
-    } while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO1) > 0);
-}
-
 } // namespace motors

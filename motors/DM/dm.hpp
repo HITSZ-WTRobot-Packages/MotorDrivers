@@ -293,21 +293,3 @@ private:
 };
 
 } // namespace motors
-
-extern "C"
-{
-/**
- * @brief DM FIFO0 中断回调包装
- *
- * 如果项目没有统一 CAN 分发器，可以直接使用这个 HAL 包装；否则更推荐统一把报文分发到
- * `CANBaseReceiveCallback()`。
- */
-void DM_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan);
-/**
- * @brief DM FIFO1 中断回调包装
- *
- * 如果项目没有统一 CAN 分发器，可以直接使用这个 HAL 包装；否则更推荐统一把报文分发到
- * `CANBaseReceiveCallback()`。
- */
-void DM_CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan);
-}

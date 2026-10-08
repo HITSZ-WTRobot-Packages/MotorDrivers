@@ -362,36 +362,4 @@ CAN_TxHeaderTypeDef DMMotor::tx_header(const uint8_t& DLC) const
     return hdr;
 }
 
-extern "C" void DM_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
-{
-    // FIFO 里可能一次累积多帧，因此循环读取直到清空。
-    do
-    {
-        CAN_RxHeaderTypeDef header;
-        uint8_t             data[8];
-        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) != HAL_OK)
-        {
-            Error_Handler();
-            return;
-        }
-        DMMotor::CANBaseReceiveCallback(hcan, &header, data);
-    } while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0);
-}
-
-extern "C" void DM_CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan)
-{
-    // FIFO1 的处理过程与 FIFO0 一致。
-    do
-    {
-        CAN_RxHeaderTypeDef header;
-        uint8_t             data[8];
-        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &header, data) != HAL_OK)
-        {
-            Error_Handler();
-            return;
-        }
-        DMMotor::CANBaseReceiveCallback(hcan, &header, data);
-    } while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO1) > 0);
-}
-
 } // namespace motors

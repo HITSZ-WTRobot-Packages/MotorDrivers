@@ -16,7 +16,6 @@
 
 namespace motors
 {
-
 /**
  * @brief VESC 电调对象
  *
@@ -266,23 +265,4 @@ private:
      */
     void sendSetCommand(SetCommand cmd, float value) const;
 };
-
 } // namespace motors
-
-extern "C"
-{
-/**
- * @brief VESC FIFO0 中断回调包装
- *
- * 如果项目没有统一 CAN 分发器，可以直接使用这个 HAL 包装；否则更推荐统一把报文分发到
- * `CANBaseReceiveCallback()`。
- */
-void VESC_CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan);
-/**
- * @brief VESC FIFO1 中断回调包装
- *
- * 如果项目没有统一 CAN 分发器，可以直接使用这个 HAL 包装；否则更推荐统一把报文分发到
- * `CANBaseReceiveCallback()`。
- */
-void VESC_CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan);
-}
