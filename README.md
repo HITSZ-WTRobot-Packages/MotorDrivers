@@ -26,6 +26,12 @@
     - [x] `J4310_2EC`
     - [x] `J10010L_2EC`
     - [x] `S3519`
+    - [x] `S2325_1EC`
+    - [x] `J4340_2EC`
+    - [x] `J8009P_2EC`
+- `MI`
+    - [x] 小米 CyberGear 微电机
+      当前已覆盖 MIT 运控、使能 / 失能、机械零位与参数读写
 - `VESC`
     - [x] 通用 VESC CAN 设备支持
       当前已覆盖电流控制、内部速度控制与常见状态反馈解析
@@ -99,9 +105,11 @@ MotorDrivers/
 其中“控制输入能力”又是显式可查询的：
 
 - `supportsCurrent()`
-- `supportsInternalVelocity()`
-- `supportsInternalPosition()`
+- `internalVelocitySupportLevel()`：`NotSupported` / `RefOnly` / `RefAndMaxi`
+- `internalPositionSupportLevel()`：`NotSupported` / `RefOnly` / `RefAndMaxv`
 - `supportsInternalMIT()`
+
+后两个返回等级而不是布尔值，这样除了“能不能用内部速度 / 位置指令”，还能表达“支不支持随指令携带最大电流 / 最大速度限制”。
 
 这意味着控制器不会通过“电机型号 if-else”来决定怎么控制，而是先问驱动“你支持哪一种输入”，再选择可行路径。
 
@@ -181,76 +189,66 @@ MotorDrivers/
 
 ## CAN 接入方式
 
-当前已落地的三类驱动都是 CAN 设备，因此它们都提供两类接入点：
+DJI、DM、MI、VESC 均依赖 `BasicComponents` 的
+[`bsp/can_driver2`](https://github.com/HITSZ-WTRobot-Packages/BasicComponents/tree/main/bsp/can_driver2)。
+`Config::can` 借用一个 `bsp::can::Can&`，不再接收 HAL 句柄。
+每个电机在构造时通过 `Can::register_callback` 注册自己的成员回调，在 ISR 中匹配自身协议与 ID 后解码；
+不再维护电机反馈映射表，也不再提供 `CANBaseReceiveCallback` 或手工 HAL FIFO 分发入口。
 
-- `CAN_FilterInit(...)`：初始化对应协议的滤波器
-- `CANBaseReceiveCallback(...)`：处理一帧已经取出的 CAN 报文
+初始化顺序：
 
-如果你的项目已经有统一 CAN 接收层，推荐把 `CANBaseReceiveCallback(...)` 注册进去；如果没有，也可以在
-HAL 的 FIFO 回调里直接调用它们。
+1. 完成板级 HAL 初始化，并为 CAN/FDCAN 配置好时序、IRQ 和接收资源。
+2. 构造 `Can` 和所有电机，配置过滤器；这两项均必须在 `Can::start()` 前完成。
+3. 检查 `Can::start()` 的返回值，再使能控制器或发送电机命令。
 
-如果你使用的是 `BasicComponents` 仓库里的
-[`bsp/can_driver`](https://github.com/HITSZ-WTRobot-Packages/BasicComponents/tree/main/bsp/can_driver)，
-它的接收路径就是“先从 FIFO 里取出一帧，再按注册顺序依次直接调用所有已注册回调”。这种情况下，可以把三家的
-`CANBaseReceiveCallback(...)` 直接注册给它。
+电机、`Can` 和 HAL 句柄都必须存活到总线不再使用；启动后不能新增电机，也不能销毁、复制或移动已注册电机。
+注册失败（启动后注册或回调容量不足）会调用 `Error_Handler()`。所有协议与应用回调共享每条总线的
+`CAN_DRIVER_MAX_CALLBACKS` 容量，默认 `14`；同一总线内的协议电机 ID 唯一性由调用方保证。
+DJI 在构造时检查同一总线上的重复 `id1`，并自动登记发送槽位；该登记仅用于组包，不参与反馈分发。
+不能再把旧驱动或另一个 `Can` 绑定到同一外设。
 
-### 最小接收样例（直接调用）
+### 最小接入样例
 
-下面这个样例只展示“如何在 HAL FIFO 回调里把一帧 CAN 报文直接交给三类驱动”，便于移植到不同项目里。
-
-```cpp
-#include "dji.hpp"
-#include "dm.hpp"
-#include "vesc.hpp"
-
-void motor_can_filter_init()
-{
-    motors::DJIMotor::CAN_FilterInit(&hcan1, 0);
-    motors::DMMotor::CAN_FilterInit(&hcan1, 1, 0x12);
-    motors::VESCMotor::CAN_FilterInit(&hcan1, 2);
-}
-
-extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan)
-{
-    while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0)
-    {
-        CAN_RxHeaderTypeDef header{};
-        uint8_t             data[8];
-        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) != HAL_OK)
-        {
-            Error_Handler();
-            return;
-        }
-
-        motors::DJIMotor::CANBaseReceiveCallback(hcan, &header, data);
-        motors::DMMotor::CANBaseReceiveCallback(hcan, &header, data);
-        motors::VESCMotor::CANBaseReceiveCallback(hcan, &header, data);
-    }
-}
-```
-
-如果你的项目已经封装好了统一 CAN 接收层，也可以不写上面的 FIFO 轮询，而是直接把三家的
-`CANBaseReceiveCallback(...)` 注册进去。以 `BasicComponents` 的 `bsp/can_driver` 为例，可以写成：
+以下使用 FDCAN1；bxCAN 项目改用自己的 HAL CAN 句柄。函数须在 HAL 初始化之后调用一次。
 
 ```cpp
-#include "can_driver.hpp"
+#include "fdcan.h"
 #include "dji.hpp"
-#include "dm.hpp"
-#include "vesc.hpp"
+
+bsp::can::Can motor_can{hfdcan1};
 
 void motor_can_init()
 {
-    motors::DJIMotor::CAN_FilterInit(&hcan1, 0);
-    motors::DMMotor::CAN_FilterInit(&hcan1, 1, 0x12);
-    motors::VESCMotor::CAN_FilterInit(&hcan1, 2);
+    static motors::DJIMotor motor({
+            .can = motor_can,
+            .type = motors::DJIMotor::Type::M3508_C620,
+            .id1 = 1,
+    });
 
-    CAN_InitMainCallback(&hcan1);
-    CAN_RegisterCallback(&hcan1, motors::DJIMotor::CANBaseReceiveCallback);
-    CAN_RegisterCallback(&hcan1, motors::DMMotor::CANBaseReceiveCallback);
-    CAN_RegisterCallback(&hcan1, motors::VESCMotor::CANBaseReceiveCallback);
-    CAN_Start(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+    if (motors::DJIMotor::CAN_FilterInit(motor_can, 0) != bsp::can::Status::Ok)
+        Error_Handler();
+    if (motor_can.start() != bsp::can::Status::Ok)
+        Error_Handler();
 }
 ```
+
+`CAN_FilterInit` 返回 `bsp::can::Status`，调用方必须检查结果。各协议的过滤条件如下：
+
+| 驱动 | 调用 | 接收 ID 条件 |
+| --- | --- | --- |
+| DJI | `DJIMotor::CAN_FilterInit(can, index)` | 标准 ID，`0x200 / 0x7F0` 掩码 |
+| DM | `DMMotor::CAN_FilterInit(can, index, master_id)` | 标准 ID 精确匹配 `master_id`；所有 DM 共用该值 |
+| MI | `MIMotor::CAN_FilterInit(can, index)` | 全部扩展 ID |
+| VESC | `VESCMotor::CAN_FilterInit(can, index)` | 全部扩展 ID |
+
+MI 与 VESC 混用时，一个放行扩展帧的过滤器即可。`index` 在 bxCAN 中是 filter bank，
+在 FDCAN 中是对应标准/扩展过滤器数组的 element 下标，不能直接互换。
+FDCAN 的过滤器数量与 FIFO0 资源须在 HAL 初始化前分配；未匹配帧是否拒收由板级
+`Can::configure_filter(bsp::can::GlobalFilter{})` 策略决定。bxCAN 的 CAN1/CAN2 bank 分界由
+`CAN_DRIVER_BXCAN_CAN2_START_BANK` 统一配置，且两路过滤器都须在任一路启动前配置。
+
+下文各控制样例是独立的接入示例，均借用板级定义的 `motor_can`；先调用所有需要的 `*_init()`，
+再配置过滤器并启动总线，最后调用相应的 `*_start()`。不要在最小样例已经启动的总线上追加构造电机。
 
 ## 调用样例
 
@@ -263,7 +261,7 @@ void motor_can_init()
 
 - 全局只保留指针或句柄
 - 在显式的初始化函数里按顺序 `new`
-- 先构造电机对象，再构造控制器对象，最后再 `enable()`
+- 先构造电机和控制器，再启动总线，最后才 `enable()` 或发送参考值
 
 很多嵌入式项目还会全局重载 `operator new`，把这里的 `new` 定向到静态内存池、RTOS 堆或预留内存区，
 这样既能控制初始化顺序，也不会依赖默认运行时堆。这里只先说明推荐用法，不展开具体重载实现。
@@ -289,7 +287,7 @@ controllers::MotorVelController*    wheel_lf_ctrl = nullptr;
 void wheel_init()
 {
     wheel_lf = new motors::DJIMotor({
-            .hcan           = &hcan1,
+            .can            = motor_can,
             .type           = motors::DJIMotor::Type::M3508_C620,
             .id1            = 1,
             .auto_zero      = true,
@@ -309,6 +307,10 @@ void wheel_init()
                     .ctrl_mode = controllers::ControlMode::ExternalPID,
             });
 
+}
+
+void wheel_start() // 在 motor_can.start() 成功之后调用
+{
     wheel_lf_ctrl->enable();
     wheel_lf_ctrl->setRef(300.0f); // 目标速度 300 rpm
 }
@@ -317,8 +319,8 @@ void wheel_task_1khz()
 {
     wheel_lf_ctrl->update();
 
-    motors::DJIMotor::SendIqCommand(
-            &hcan1, motors::DJIMotor::IqSetCMDGroup::IqCMDGroup_1_4);
+    (void)motors::DJIMotor::SendIqCommand(
+            motor_can, motors::DJIMotor::IqSetCMDGroup::IqCMDGroup_1_4);
 }
 ```
 
@@ -343,7 +345,7 @@ controllers::MotorPosController*   lift_ctrl  = nullptr;
 void lift_init()
 {
     lift_motor = new motors::DMMotor({
-            .hcan           = &hcan1,
+            .can            = motor_can,
             .id0            = 0x09,
             .type           = motors::DMMotor::Type::J4310_2EC,
             .mode           = motors::DMMotor::Mode::Pos,
@@ -374,6 +376,10 @@ void lift_init()
                     .internal_set_ratio = 1,
             });
 
+}
+
+void lift_start() // 在 motor_can.start() 成功之后调用
+{
     lift_ctrl->enable();   // 获取控制权时会顺带发送 DM 使能包
     lift_ctrl->setRef(90); // 目标角度 90 deg
 }
@@ -412,7 +418,7 @@ controllers::MotorVelController*   conveyor_ctrl  = nullptr;
 void conveyor_init()
 {
     conveyor_motor = new motors::VESCMotor({
-            .hcan           = &hcan1,
+            .can            = motor_can,
             .id             = 1,
             .electrodes     = 7,    // 14 极电机应填写 7，而不是 14
             .reduction_rate = 1.0f,
@@ -433,6 +439,10 @@ void conveyor_init()
                     .internal_set_ratio = 1,
             });
 
+}
+
+void conveyor_start() // 在 motor_can.start() 成功之后调用
+{
     conveyor_ctrl->enable();
     conveyor_ctrl->setRef(1200.0f); // 目标输出轴速度 1200 rpm
 }
@@ -447,10 +457,66 @@ void conveyor_debug()
     if (!conveyor_motor)
         return;
 
-    conveyor_motor->setCurrent(5.0f);         // 直接给电流
-    conveyor_motor->setInternalVelocity(800); // 直接给速度
+    conveyor_motor->setCurrent(5.0f); // 直接给电流
+    conveyor_motor->setInternalVelocity(800.0f, motors::IMotor::kNoLimit); // 直接给速度
 }
 ```
+
+### 样例 4：MI 走内部 MIT 运控模式
+
+`MI` 默认控制模式就是 `InternalMIT`，因此最典型的用法是在周期任务里直接下发 MIT 五元组；
+位置保持、轨迹跟踪和阻抗控制都由这个接口完成。
+
+```cpp
+#include "mi.hpp"
+
+namespace
+{
+motors::MIMotor* joint_motor = nullptr;
+} // namespace
+
+void joint_init()
+{
+    joint_motor = new motors::MIMotor({
+            .can            = motor_can,
+            .id             = 3,
+            .master_id      = 0,
+            .auto_zero      = true,
+            .reverse        = false,
+            .reduction_rate = 1.0f,
+    });
+}
+
+void joint_start() // 在 motor_can.start() 成功之后调用
+{
+    joint_motor->disable(true); // 先停转并清故障
+    joint_motor->writeParam(0x7005, static_cast<float>(motors::MIMotor::Mode::MIT));
+    joint_motor->enable();
+}
+
+void joint_task_1khz()
+{
+    if (!joint_motor || !joint_motor->isConnected())
+        return;
+
+    // t_ff 单位 Nm，p_ref 单位 deg，v_ref 单位 deg/s，kp / kd 为 MIT 刚度与阻尼
+    const float t_ff = 0.0f;
+    const float p_ref = 0.0f;
+    const float v_ref = 0.0f;
+    joint_motor->setInternalMIT(t_ff, p_ref, v_ref, 80.0f, 1.0f);
+}
+
+void joint_idle_task_1khz()
+{
+    // 未使能时用失能包保活，维持一收一回通信节奏
+    if (joint_motor)
+        joint_motor->ping();
+}
+```
+
+如果改用 `MotorVelController` / `MotorPosController` 且 `ctrl_mode` 取 `Default`，控制器解析出的模式就是 `InternalMIT`，
+此时控制器会退化为 MCU 侧外部串级 PID，最终通过 `setCurrent()` 下发纯力矩（`kp = kd = 0`）。
+需要用到驱动器内部的刚度 / 阻尼时，应在周期任务里直接调用 `setInternalMIT()`。
 
 ## 各驱动专项说明
 
@@ -461,6 +527,8 @@ void conveyor_debug()
   重点说明聚合发送、反馈展开和圈数统计
 - [DM 驱动说明](motors/DM/README.md)
   重点说明 `master_id`、`id0` 规划、`ping()` 语义和模式约束
+- [MI 驱动说明](motors/MI/README.md)
+  重点说明 CyberGear 协议帧、MIT 参数范围与参数读写
 - [VESC 驱动说明](motors/VESC/README.md)
   重点说明 `ERPM`、`electrodes` 的真实含义和状态反馈字段解释
 
@@ -473,6 +541,7 @@ void conveyor_debug()
 3. 本 README 里的“设计理念”“单位约定”“调用样例”
 4. `motors/DJI/README.md`
 5. `motors/DM/README.md`
-6. `motors/VESC/README.md`
+6. `motors/MI/README.md`
+7. `motors/VESC/README.md`
 
 这样更容易先理解能力模型，再理解各类电机的特殊约束。

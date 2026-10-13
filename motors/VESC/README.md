@@ -23,9 +23,10 @@
 也就是说：
 
 - `supportsCurrent() == true`
-- `supportsInternalVelocity() == true`
-- `supportsInternalPosition() == false`
+- `internalVelocitySupportLevel() == InternalVelocitySupportLevel::RefOnly`
+- `internalPositionSupportLevel() == InternalPositionSupportLevel::NotSupported`
 - `supportsInternalMIT() == false`
+- `defaultControlMode() == ExternalPID`
 
 虽然 VESC 协议里本身存在位置相关指令，但当前这个类没有把它作为稳定接口对外开放。
 
@@ -63,6 +64,7 @@
 
 - `getVelocity()` 返回的是输出轴速度
 - `setInternalVelocity()` 传入的也是输出轴速度
+- `setInternalVelocity()` 的 `maxi` 参数被忽略：VESC 内部速度模式只支持给定目标转速（`RefOnly`）
 
 ## 状态反馈说明
 
