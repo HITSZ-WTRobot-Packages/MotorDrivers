@@ -61,6 +61,9 @@ static constexpr float get_inv_vel_reduction_rate(const DMMotor::Type type)
 
 DMMotor::DMMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f : 1.0f)
 {
+    if (cfg_.can_fd_brs && !bsp::can::Can::SupportsFD)
+        Error_Handler();
+
     // id 仅低四位有效
     cfg_.id0 &= 0x0F;
 
@@ -289,6 +292,7 @@ bsp::can::FrameHeader DMMotor::tx_header() const noexcept
     header.format  = cfg_.can_fd_brs ? bsp::can::FrameFormat::Fd : bsp::can::FrameFormat::Classic;
     header.type    = bsp::can::FrameType::Data;
 
+    header.bit_rate_switch = cfg_.can_fd_brs;
     return header;
 }
 

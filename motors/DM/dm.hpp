@@ -97,6 +97,7 @@ public:
         bool  auto_zero      = false; ///< 上电收够一段稳定反馈后，是否自动把当前角度设为零点
         bool  reverse        = false; ///< 是否反转输出方向
         float reduction_rate = 1.0f;  ///< 外接减速比
+        bool  can_fd_brs     = false; ///< true：CAN FD + BRS；false：Classic CAN，须匹配电调配置
     };
 
     explicit DMMotor(const Config& cfg);
