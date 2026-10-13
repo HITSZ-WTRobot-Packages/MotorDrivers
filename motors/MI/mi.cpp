@@ -5,7 +5,7 @@
  * @brief   小米 CyberGear 微电机驱动实现
  *
  * 这里实现了：
- * - CAN 扩展帧反馈到电机对象的映射与分发
+ * - CAN 扩展帧到电机对象的回调分发
  * - Type 2 反馈数据到物理量的换算与多圈展开
  * - Type 1 MIT 控制指令的打包与发送
  * - Type 3 / 4 使能失能
@@ -17,14 +17,11 @@
  */
 #include "mi.hpp"
 
-#include "FixedPointerMap.hpp"
-#include "can_driver.h"
-
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <span>
 
 #define DEG2RAD(__DEG__) ((__DEG__) * 3.14159265358979323846f / 180.0f)
 #define RAD2DEG(__RAD__) ((__RAD__) / 3.14159265358979323846f * 180.0f)
@@ -37,62 +34,6 @@ namespace motors
 // ---- 派生常量 ----
 
 static constexpr float kPosHalfDeg = RAD2DEG(MIMotor::kPosMaxRad); // ±12.5 rad → ±716.2°
-
-// ---- CAN 反馈映射表 ----
-
-struct FeedbackMap
-{
-    CAN_HandleTypeDef*                                  hcan = nullptr;
-    FixedPointerMap<size_t, MIMotor, MOTORS_MI_MAX_NUM> motors{};
-};
-
-static std::array<FeedbackMap, CAN_NUM> map{};
-
-static FeedbackMap* find_map(const CAN_HandleTypeDef* hcan)
-{
-    for (auto& m : map)
-    {
-        if (m.hcan == hcan)
-            return &m;
-    }
-    return nullptr;
-}
-
-static bool register_motor(CAN_HandleTypeDef* hcan, const size_t id, MIMotor* motor)
-{
-    if (!hcan || !motor)
-        return false;
-
-    FeedbackMap* m = find_map(hcan);
-    if (!m)
-    {
-        for (auto& slot : map)
-        {
-            if (slot.hcan == nullptr)
-            {
-                slot.hcan = hcan;
-                m         = &slot;
-                break;
-            }
-        }
-        if (!m)
-            return false;
-    }
-
-    return m->motors.insert(id, motor);
-}
-
-static bool unregister_motor(CAN_HandleTypeDef* hcan, const size_t id)
-{
-    if (!hcan)
-        return false;
-
-    const auto m = find_map(hcan);
-    if (!m)
-        return false;
-
-    return m->motors.erase(id);
-}
 
 // ---- 字节序读写 ----
 //
@@ -204,13 +145,8 @@ MIMotor::MIMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f : 1.
     const float reduction_rate = cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f;
     inv_reduction_rate_        = 1.0f / reduction_rate;
 
-    if (!register_motor(cfg_.hcan, cfg_.id, this))
+    if (cfg_.can.register_callback<&MIMotor::on_can>(*this) != bsp::can::Status::Ok)
         Error_Handler();
-}
-
-MIMotor::~MIMotor()
-{
-    unregister_motor(cfg_.hcan, cfg_.id);
 }
 
 // ---- 角度 / 零点 ----
@@ -222,26 +158,37 @@ void MIMotor::resetAngle()
     abs_angle_          = 0.0f;
 }
 
-// ---- CAN 报文头 ----
+// ---- CAN 报文头与发送 ----
 
-CAN_TxHeaderTypeDef MIMotor::tx_header(const uint8_t comm_type, const uint16_t data_area2) const
+bsp::can::FrameHeader MIMotor::make_header(const uint8_t comm_type, const uint16_t data_area2) const
 {
-    CAN_TxHeaderTypeDef hdr{};
-    hdr.ExtId = (static_cast<uint32_t>(comm_type) << 24) |
-                (static_cast<uint32_t>(data_area2) << 8) | (cfg_.id & 0x7F);
-    hdr.IDE = CAN_ID_EXT;
-    hdr.RTR = CAN_RTR_DATA;
-    hdr.DLC = 8;
+    bsp::can::FrameHeader hdr{};
+    hdr.id      = (static_cast<uint32_t>(comm_type) << 24) |
+                  (static_cast<uint32_t>(data_area2) << 8) | (cfg_.id & 0x7F);
+    hdr.id_type = bsp::can::IdType::Extended;
+    hdr.format  = bsp::can::FrameFormat::Classic;
+    hdr.type    = bsp::can::FrameType::Data;
     return hdr;
+}
+
+bool MIMotor::send_frame(const uint8_t comm_type, const uint16_t data_area2,
+                         const uint8_t (&data)[8])
+{
+    const bsp::can::FrameView frame{ make_header(comm_type, data_area2),
+                                     std::span<const uint8_t>{ data, sizeof data } };
+    const bsp::can::SendResult result = cfg_.can.send(frame);
+
+    // Submitted/Queued/ReplacedOldest 均表示帧已被驱动受理（旧版对应 HAL 未返回失败）。
+    return result == bsp::can::SendResult::Submitted || result == bsp::can::SendResult::Queued ||
+           result == bsp::can::SendResult::ReplacedOldest;
 }
 
 // ---- 使能 / 失能 ----
 
 bool MIMotor::sendEnableDisable(const uint8_t comm_type, const uint8_t data0)
 {
-    uint8_t    data[8] = { data0, 0, 0, 0, 0, 0, 0, 0 };
-    const auto hdr     = tx_header(comm_type, cfg_.master_id);
-    return CAN_SendMessage(cfg_.hcan, &hdr, data) != CAN_SEND_FAILED;
+    const uint8_t data[8] = { data0, 0, 0, 0, 0, 0, 0, 0 };
+    return send_frame(comm_type, cfg_.master_id, data);
 }
 
 bool MIMotor::enable()
@@ -291,8 +238,7 @@ void MIMotor::setInternalMIT(const float t_ff, float p_ref, float v_ref, float k
     write_u16_be(&data[6], kd_u16);
 
     // data2（bit23~8 of ExtId）承载力矩值
-    const auto hdr = tx_header(1, tor_u16);
-    CAN_SendMessage(cfg_.hcan, &hdr, data);
+    (void)send_frame(1, tor_u16, data);
 }
 
 // ---- 电流 / 力矩输入 ----
@@ -307,20 +253,19 @@ void MIMotor::setCurrent(const float current)
 
 bool MIMotor::readParam(const uint16_t index, float& value)
 {
-    uint8_t data[8]     = { static_cast<uint8_t>(index & 0xFF),
-                            static_cast<uint8_t>((index >> 8) & 0xFF),
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0 };
+    const uint8_t data[8] = { static_cast<uint8_t>(index & 0xFF),
+                              static_cast<uint8_t>((index >> 8) & 0xFF),
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0 };
     param_read_valid_   = false;
     param_read_pending_ = true;
     param_read_index_   = index;
 
-    const auto hdr = tx_header(17, cfg_.master_id);
-    if (CAN_SendMessage(cfg_.hcan, &hdr, data) == CAN_SEND_FAILED)
+    if (!send_frame(17, cfg_.master_id, data))
     {
         param_read_pending_ = false;
         return false;
@@ -361,8 +306,7 @@ bool MIMotor::writeParam(const uint16_t index, const float value)
         write_float_le(&data[4], value);
     }
 
-    const auto hdr = tx_header(18, cfg_.master_id);
-    return CAN_SendMessage(cfg_.hcan, &hdr, data) != CAN_SEND_FAILED;
+    return send_frame(18, cfg_.master_id, data);
 }
 
 // ---- 控制权 ----
@@ -428,70 +372,64 @@ void MIMotor::decode(const uint8_t data[8], const uint16_t fault, const RunState
 
 // ---- CAN 滤波器初始化 ----
 
-void MIMotor::CAN_FilterInit(CAN_HandleTypeDef* hcan, const uint32_t filter_bank)
+bsp::can::Status MIMotor::CAN_FilterInit(bsp::can::Can& can, const uint32_t filter_index)
 {
-    const CAN_FilterTypeDef filter = {
-        .FilterIdHigh         = 0x0000,
-        .FilterIdLow          = 0x0000 | CAN_ID_EXT,
-        .FilterMaskIdHigh     = 0x0000,
-        .FilterMaskIdLow      = 0x0000 | CAN_ID_EXT,
-        .FilterFIFOAssignment = CAN_FILTER_FIFO0,
-        .FilterBank           = filter_bank,
-        .FilterMode           = CAN_FILTERMODE_IDMASK,
-        .FilterScale          = CAN_FILTERSCALE_32BIT,
-        .FilterActivation     = ENABLE,
-        .SlaveStartFilterBank = 14,
-    };
-
-    if (HAL_CAN_ConfigFilter(hcan, &filter) != HAL_OK)
-        Error_Handler();
+    // 与旧版 32 位掩码 bank 等价：key 只带 IDE 位、掩码只选中 IDE 位，即放行全部
+    // 扩展帧、拒绝标准帧。IdFilter 不比较 RTR，远程帧也会进入 FIFO，由 on_can 丢弃。
+    // index 的资源含义随后端而异：bxCAN 为 filter bank 编号，FDCAN 为扩展过滤器
+    // element 下标，两者不可互换。
+    bsp::can::IdFilter filter{};
+    filter.index   = filter_index;
+    filter.id_type = bsp::can::IdType::Extended;
+    filter.mode    = bsp::can::FilterMode::Mask;
+    filter.action  = bsp::can::FilterAction::Fifo0;
+    filter.id1     = 0;
+    filter.id2     = 0;
+    return can.configure_filter(filter);
 }
 
-// ---- CAN 接收分发 ----
+// ---- CAN 接收回调 ----
 
-void MIMotor::CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
-                                     const CAN_RxHeaderTypeDef* header,
-                                     const uint8_t*             data)
+void MIMotor::on_can(const bsp::can::FrameView& frame) noexcept
 {
-    if (!hcan || !header || !data || header->IDE != CAN_ID_EXT || header->DLC < 8)
-        return;
-
-    const auto m = find_map(hcan);
-    if (!m)
+    const bsp::can::FrameHeader& header = frame.header;
+    // 本协议只使用扩展 ID 的经典数据帧，且所有报文均为 8 字节负载。
+    if (header.id_type != bsp::can::IdType::Extended ||
+        header.format != bsp::can::FrameFormat::Classic ||
+        header.type != bsp::can::FrameType::Data || frame.data.size() < 8)
         return;
 
     // 发送时电机 ID 在 bit7~0；反馈时电机把自身 ID 放在 bit15~8
-    const uint8_t id    = static_cast<uint8_t>((header->ExtId >> 8) & 0xFF);
-    const auto    motor = m->motors.find(id);
-    if (!motor)
+    const uint8_t id = static_cast<uint8_t>((header.id >> 8) & 0xFF);
+    if (id != cfg_.id)
         return;
 
-    const uint8_t comm_type = static_cast<uint8_t>((header->ExtId >> 24) & 0x1F);
+    const uint8_t comm_type = static_cast<uint8_t>((header.id >> 24) & 0x1F);
 
     // 仅处理 Type 2 反馈帧
     if (comm_type == 2)
     {
-        const uint16_t fault     = static_cast<uint16_t>((header->ExtId >> 16) & 0x3F);
-        const auto     run_state = static_cast<RunState>((header->ExtId >> 22) & 0x3);
-        motor->decode(data, fault, run_state);
+        const uint16_t fault     = static_cast<uint16_t>((header.id >> 16) & 0x3F);
+        const auto     run_state = static_cast<RunState>((header.id >> 22) & 0x3);
+        decode(frame.data.data(), fault, run_state);
     }
-    else if (comm_type == 17 && motor->param_read_pending_)
+    else if (comm_type == 17 && param_read_pending_)
     {
-        const uint16_t index = read_u16_le(&data[0]);
-        if (index != motor->param_read_index_)
+        const uint16_t index = read_u16_le(&frame.data[0]);
+        if (index != param_read_index_)
             return;
 
         if (index == 0x7005)
         {
-            motor->param_read_value_ = static_cast<float>(data[4]);
+            param_read_value_ = static_cast<float>(frame.data[4]);
         }
         else
         {
             float value = 0.0f;
-            std::memcpy(&value, &data[4], sizeof(float));
-            motor->param_read_value_ = value;
+            std::memcpy(&value, &frame.data[4], sizeof(float));
+            param_read_value_ = value;
         }
-        motor->param_read_valid_ = true;
+        param_read_valid_ = true;
     }
 }
 

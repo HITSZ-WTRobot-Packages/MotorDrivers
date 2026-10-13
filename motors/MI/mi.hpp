@@ -20,19 +20,15 @@
  * - Type 6：设置机械零位（掉电丢失）
  * - Type 17 / 18：参数读写
  *
- * 参考 DM 驱动的封装风格：反馈通过 FixedPointerMap 分发到具体电机对象，
- * 控制指令由电机对象自行打包发送。控制权通过 tryAcquireController /
- * releaseController 管理，获取控制权时自动使能电机。
+ * 反馈通过向所在 Can 总线注册的成员回调分发：对象必须在对应 `Can::start()` 之前
+ * 构造，并存活到该总线不再使用。控制指令由电机对象自行打包发送，控制权通过
+ * tryAcquireController / releaseController 管理，获取控制权时自动使能电机。
  */
 #pragma once
 
-#include "can_driver.h"
+#include "can_driver.hpp"
 #include "motor_if.hpp"
 #include "watchdog.hpp"
-
-#ifndef MOTORS_MI_MAX_NUM
-#    define MOTORS_MI_MAX_NUM (8)
-#endif
 
 namespace motors
 {
@@ -41,7 +37,7 @@ namespace motors
  * @brief 小米 CyberGear 电机驱动对象
  *
  * 负责：
- * - 注册到某条 CAN 总线的反馈映射表
+ * - 构造时向所在 Can 总线注册接收回调（析构后该总线不得再使用本对象）
  * - 解析 Type 2 反馈报文，展开多圈连续角度
  * - 打包并发送 MIT 控制指令（Type 1）
  * - 发送使能 / 失能 / 归零指令
@@ -99,9 +95,9 @@ public:
      */
     struct Config
     {
-        CAN_HandleTypeDef* hcan;      ///< 所在 CAN 总线
-        uint8_t            id;        ///< 电机 CAN ID，范围 0~127，出厂默认 127
-        uint8_t            master_id; ///< 主机 CAN ID，默认 0
+        bsp::can::Can& can;           ///< 所在 CAN 总线，须在 Can::start() 之前构造本对象
+        uint8_t        id;            ///< 电机 CAN ID，范围 0~127，出厂默认 127
+        uint8_t        master_id;     ///< 主机 CAN ID，默认 0
 
         bool  auto_zero      = true;  ///< 上电收到足够稳定反馈后，是否自动把当前角度设为零点
         bool  reverse        = false; ///< 是否把输出方向整体反向
@@ -109,7 +105,12 @@ public:
     };
 
     explicit MIMotor(const Config& cfg);
-    ~MIMotor() override;
+    /// 回调由总线借用本对象，必须存活到该总线不再使用；禁止复制/移动以免回调指向旧地址。
+    ~MIMotor() override = default;
+    MIMotor(const MIMotor&)            = delete;
+    MIMotor& operator=(const MIMotor&) = delete;
+    MIMotor(MIMotor&&)                 = delete;
+    MIMotor& operator=(MIMotor&&)      = delete;
 
     // ---- IMotor 反馈接口 ----
 
@@ -210,23 +211,25 @@ public:
     bool tryAcquireController(controllers::IController* ctrl) override;
     void releaseController(controllers::IController* ctrl) override;
 
-    // ---- CAN 静态方法 ----
+    // ---- CAN 滤波器 ----
 
     /**
      * @brief 初始化 CyberGear 反馈对应的 CAN 滤波器
      *
-     * 接收所有扩展帧，由软件层按 Type 和 ID 分发。
-     */
-    static void CAN_FilterInit(CAN_HandleTypeDef* hcan, uint32_t filter_bank);
-    /**
-     * @brief 统一 CAN 接收入口
+     * 只放行扩展帧，不区分数据帧与远程帧；通信类型与电机 ID 由软件层在接收回调里
+     * 分发。与旧版 `CAN_FilterTypeDef`（`FilterIdLow = CAN_ID_EXT`、掩码仅选中 IDE
+     * 位）等价。
      *
-     * 如果项目里已有 CAN 分发器，推荐注册到分发器中；
-     * 否则可在 HAL FIFO 回调里直接调用。
+     * `filter_index` 的资源含义随后端而异且不可互换：bxCAN 为 filter bank 编号
+     * （0..27），FDCAN 为所选扩展过滤器数组内的 element 下标。命中帧固定写入
+     * Rx FIFO0，与旧版 `CAN_FILTER_FIFO0` 一致。必须在对应 `Can::start()` 之前调用。
+     *
+     * @param can 目标 CAN 总线
+     * @param filter_index bxCAN filter bank 编号或 FDCAN element 下标
+     * @return 配置结果，失败原因见 bsp::can::Status
      */
-    static void CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
-                                       const CAN_RxHeaderTypeDef* header,
-                                       const uint8_t*             data);
+    [[nodiscard]] static bsp::can::Status CAN_FilterInit(bsp::can::Can& can,
+                                                         uint32_t        filter_index);
 
     // ---- 协议常量（mi.cpp 换算函数需要引用） ----
     static constexpr float kPosMaxRad = 12.5f;  ///< 位置量程，单位 rad（对应 P_MIN=-12.5,
@@ -238,16 +241,30 @@ public:
 
 private:
     /**
+     * @brief 总线接收回调，仅在 ISR 上下文调用
+     *
+     * 只处理扩展 ID 的经典数据帧；先按通信类型判据过滤，再把电机 ID 与本对象
+     * `Config::id` 比对，命中后交给 Type 2 解码或 Type 17 参数读回路径。
+     */
+    void on_can(const bsp::can::FrameView& frame) noexcept;
+
+    /**
      * @brief 解码 Type 2 反馈帧
      */
     void decode(const uint8_t data[8], uint16_t fault, RunState run_state);
 
     /**
-     * @brief 生成发送报文头
+     * @brief 生成发送帧头（扩展 ID、经典数据帧）
      * @param comm_type 通信类型（bit28~24）
      * @param data_area2 数据区2（bit23~8）
      */
-    [[nodiscard]] CAN_TxHeaderTypeDef tx_header(uint8_t comm_type, uint16_t data_area2) const;
+    [[nodiscard]] bsp::can::FrameHeader make_header(uint8_t comm_type, uint16_t data_area2) const;
+
+    /**
+     * @brief 发送一帧 8 字节扩展数据帧
+     * @return 帧是否被总线受理（校验失败、未启动或硬件拒收时为 false）
+     */
+    bool send_frame(uint8_t comm_type, uint16_t data_area2, const uint8_t (&data)[8]);
 
     /**
      * @brief 发送使能 / 失能 / 归零内部实现

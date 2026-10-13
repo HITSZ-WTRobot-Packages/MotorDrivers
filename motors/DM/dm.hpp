@@ -5,13 +5,9 @@
  * @brief   达妙电机驱动
  */
 #pragma once
-#include "can.h"
+#include "can_driver.hpp"
 #include "motor_if.hpp"
 #include "watchdog.hpp"
-
-#ifndef MOTORS_DM_MAX_NUM
-#    define MOTORS_DM_MAX_NUM (8)
-#endif
 
 namespace motors
 {
@@ -30,6 +26,10 @@ namespace motors
  * 当前库对 DM 还额外有两个明确约束：
  * - 所有 DM 电机共享同一个 `master_id`
  * - `id0` 建议使用 `0x09 ~ 0x0F`，以便避开 DJI 的标准 ID 区间
+ *
+ * 反馈通过 `bsp::can::Can` 的成员回调接收：构造时即向 `cfg.can` 注册
+ * `on_can`，因此本对象必须在 `Can::start()` 之前构造，并存活到该总线不再使用
+ * （can_driver2 没有注销接口）。对象禁止复制与移动，避免回调借用旧地址。
  */
 class DMMotor : public IMotor
 {
@@ -84,13 +84,13 @@ public:
      */
     struct Config
     {
-        CAN_HandleTypeDef* hcan;        ///< 所在 CAN 总线
-        uint8_t            id0;         ///< 电调 ID，仅低 4 位有效，建议从 0x09 到 0x0F
-        Type               type;        ///< 电机类型
-        Mode               mode;        ///< 驱动器控制模式，需要和上位机配置一致
-        float              pos_max_rad; ///< 驱动器配置的位置最大值，单位 rad
-        float              vel_max_rad; ///< 驱动器配置的速度最大值，单位 rad/s
-        float              tor_max;     ///< 驱动器配置的力矩最大值，单位 Nm
+        bsp::can::Can& can;         ///< 所在 CAN 总线（借用，须比本对象长寿）
+        uint8_t        id0;         ///< 电调 ID，仅低 4 位有效，建议从 0x09 到 0x0F
+        Type           type;        ///< 电机类型
+        Mode           mode;        ///< 驱动器控制模式，需要和上位机配置一致
+        float          pos_max_rad; ///< 驱动器配置的位置最大值，单位 rad
+        float          vel_max_rad; ///< 驱动器配置的速度最大值，单位 rad/s
+        float          tor_max;     ///< 驱动器配置的力矩最大值，单位 Nm
 
         float default_angle_zero = 0; ///< 默认电机零点，理解为零点时电机编码器返回的角度
 
@@ -100,7 +100,13 @@ public:
     };
 
     explicit DMMotor(const Config& cfg);
-    ~DMMotor() override;
+    /// 析构不注销 CAN 回调（can_driver2 无 unregister），对象须存活至总线不再使用。
+    ~DMMotor() override = default;
+
+    DMMotor(const DMMotor&)            = delete;
+    DMMotor& operator=(const DMMotor&) = delete;
+    DMMotor(DMMotor&&)                 = delete;
+    DMMotor& operator=(DMMotor&&)      = delete;
 
     /**
      * @brief 获取输出轴角度
@@ -198,20 +204,21 @@ public:
 
     /**
      * @brief 初始化 DM 反馈的 CAN 滤波器
-     * @param hcan CAN 句柄
-     * @param filter_bank 滤波器编号
-     * @param master_id 本机主控 ID，用于接收属于自己的反馈；当前库要求所有 DM 电机共用同一个值
-     */
-    static void CAN_FilterInit(CAN_HandleTypeDef* hcan, uint32_t filter_bank, uint32_t master_id);
-    /**
-     * @brief DM 的统一 CAN 接收入口
      *
-     * 如果项目里已经有统一 CAN 分发器，推荐把它注册到分发器中；否则也可以在 HAL 的 FIFO
-     * 回调里直接调用它。
+     * 只接受发给主机（master）的标准帧：`id1 = master_id`、掩码 `0x7FF`；命中帧写入
+     * FIFO0。RTR 位不参与掩码，因此硬件同时放行数据帧与远程帧，远程帧由 `on_can`
+     * 丢弃（原实现靠掩码低半字一并排除）。
+     *
+     * @param can 目标总线（须在 `Can::start()` 之前调用）
+     * @param filter_index 过滤器资源编号。can_driver2 中 bxCAN 为 filter bank 编号，
+     *                     FDCAN 为所选标准/扩展过滤器数组内的 element 下标，两者硬件
+     *                     布局不同，索引不可互换。
+     * @param master_id 本机主控 ID，用于接收属于自己的反馈；当前库要求所有 DM 电机共用同一个值
+     * @return can_driver2 状态码；调用方需自行检查
      */
-    static void CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
-                                       const CAN_RxHeaderTypeDef* header,
-                                       const uint8_t*             data);
+    [[nodiscard]] static bsp::can::Status CAN_FilterInit(bsp::can::Can& can,
+                                                         uint32_t       filter_index,
+                                                         uint32_t       master_id);
 
     /**
      * @brief 获取控制权时，同时尝试使能电机
@@ -229,7 +236,6 @@ public:
     bool enable();
     /**
      * @brief 发送失能报文
-     * @return 是否发送成功
      */
     void disable();
 
@@ -282,14 +288,21 @@ private:
     float sign_; ///< 方向符号，正转为 1，反转为 -1
 
     /**
-     * @brief 生成发送报文头
-     * @param DLC 数据长度
+     * @brief CAN 接收回调，由 `Can` 在 ISR 上下文广播调用
+     *
+     * 只消费本对象自己的合法反馈：标准 ID、Classic/FD 数据帧、8 字节负载，且
+     * `data[0]` 低 4 位等于自身 `id0`。
      */
-    [[nodiscard]] CAN_TxHeaderTypeDef tx_header(const uint8_t& DLC) const;
+    void on_can(const bsp::can::FrameView& frame) noexcept;
+
+    /**
+     * @brief 生成发送报文头（Standard / Data，按配置选择 Classic 或 FD+BRS）
+     */
+    [[nodiscard]] bsp::can::FrameHeader tx_header() const noexcept;
 
     // DM 协议定义好的固定使能 / 失能指令。
-    static constexpr uint8_t ENABLE_MSG[]  = { 0xFF, 0XFF, 0XFF, 0xFF, 0XFF, 0XFF, 0XFF, 0XFC };
-    static constexpr uint8_t DISABLE_MSG[] = { 0xFF, 0XFF, 0XFF, 0xFF, 0XFF, 0XFF, 0XFF, 0XFD };
+    static constexpr uint8_t ENABLE_MSG[]  = { 0xFF, 0XFF, 0XFF, 0xFF, 0XFF, 0XFF, 0XFF, 0xFC };
+    static constexpr uint8_t DISABLE_MSG[] = { 0xFF, 0XFF, 0XFF, 0xFF, 0XFF, 0XFF, 0XFF, 0xFD };
 };
 
 } // namespace motors

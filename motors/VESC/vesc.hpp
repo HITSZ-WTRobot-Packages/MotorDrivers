@@ -6,13 +6,9 @@
  */
 #pragma once
 
-#include "can.h"
+#include "can_driver.hpp"
 #include "motor_if.hpp"
 #include "watchdog.hpp"
-
-#ifndef MOTORS_VESC_MAX_NUM
-#    define MOTORS_VESC_MAX_NUM (16)
-#endif
 
 namespace motors
 {
@@ -31,6 +27,10 @@ namespace motors
  * - 内部速度输入
  *
  * 当前 VESC 实现里，速度接口单位为 rpm。
+ *
+ * 生命周期：对象在构造时把成员回调注册到 `bsp::can::Can`，因此必须在对应总线的
+ * `Can::start()` 之前构造，并保证对象比总线的使用期更长——本类不提供注销回调的
+ * 接口。为避免借用中的回调指向已失效地址，本类既不可复制也不可移动。
  */
 class VESCMotor : public IMotor
 {
@@ -119,8 +119,8 @@ public:
      */
     struct Config
     {
-        CAN_HandleTypeDef* hcan; ///< 所在 CAN 总线
-        uint8_t            id;   ///< 控制器 id，0xFF 代表广播
+        bsp::can::Can& can; ///< 所在 CAN 总线，须比本对象长寿且在 Can::start() 前构造本对象
+        uint8_t        id;  ///< 控制器 id，0xFF 代表广播
         /**
          * 电机极对数，用于机械 rpm 与 ERPM 的换算。
          *
@@ -137,7 +137,13 @@ public:
     };
 
     explicit VESCMotor(const Config& cfg);
-    ~VESCMotor() override;
+    /// 析构不注销回调：总线的回调表在 start() 后固定，对象须活到总线不再使用。
+    ~VESCMotor() override = default;
+
+    VESCMotor(const VESCMotor&)            = delete;
+    VESCMotor& operator=(const VESCMotor&) = delete;
+    VESCMotor(VESCMotor&&)                 = delete;
+    VESCMotor& operator=(VESCMotor&&)      = delete;
 
     /**
      * @brief 获取输出轴角度
@@ -182,22 +188,17 @@ public:
 
     /**
      * @brief 初始化 CAN 滤波器
-     * @param hcan CAN 句柄
-     * @param filter_bank 滤波器组
-     */
-    static void CAN_FilterInit(CAN_HandleTypeDef* hcan, uint32_t filter_bank);
-    /**
-     * @brief CAN 基础接收回调
-     * @param hcan CAN 句柄
-     * @param header CAN 报文头
-     * @param data 数据
+     * @param can 所属 CAN 总线，须在 Can::start() 之前调用
+     * @param filter_index 过滤器资源下标。can_driver2 的 index 含义随后端而定：
+     *        bxCAN 为 filter bank 编号，FDCAN 为对应 ID 类型过滤器数组内的 element
+     *        下标，两者硬件布局不同、不可互换，沿用调用方原有的分配约定。
+     * @return 配置结果；非 Ok 由调用方处理
      *
-     * 如果项目里已经有统一 CAN 分发器，推荐把它注册到分发器中；否则也可以在 HAL 的 FIFO
-     * 回调里直接调用它。
+     * VESC 只使用扩展帧，这里配置为掩码为 0 的扩展 ID 掩码过滤器：不比较任何标识符
+     * 位，等价于“接受全部扩展帧（数据帧与远程帧）”，命中后进入 FIFO0；与旧 can_driver
+     * 版本“32 位掩码、仅比较 IDE 位、FIFO0”的接受语义一致。
      */
-    static void CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
-                                       const CAN_RxHeaderTypeDef* header,
-                                       const uint8_t*             data);
+    [[nodiscard]] static bsp::can::Status CAN_FilterInit(bsp::can::Can& can, uint32_t filter_index);
 
 private:
     // 参数范围限制，对应 VESC_SET_*_MAX。
@@ -209,7 +210,7 @@ private:
     static constexpr float kSetCurrentRelMax      = 1.0f;
     static constexpr float kSetCurrentBrakeRelMax = 1.0f;
 
-    Config cfg_{}; ///< 构造时保存的配置
+    Config cfg_; ///< 构造时保存的配置
 
     uint32_t          feedback_count_ = 0; ///< 反馈计数，用于上电自动清零
     service::Watchdog watchdog_;
@@ -245,9 +246,18 @@ private:
     float velocity_  = 0.0f; ///< 输出轴角速度，当前实现单位 rpm
 
     /**
+     * @brief 总线接收回调，构造时注册到 `cfg_.can`
+     * @param frame 一帧只读视图；仅在回调内有效，ISR 上下文同步调用
+     *
+     * 只处理属于本对象的状态反馈帧：扩展帧、经典数据帧、8 字节负载，且扩展 ID
+     * 低字节等于 `Config::id`。
+     */
+    void on_can(const bsp::can::FrameView& frame) noexcept;
+
+    /**
      * @brief 解码状态反馈
      * @param status_cmd 状态指令
-     * @param data 数据
+     * @param data 数据，至少 8 字节
      */
     void decode(StatusCommand status_cmd, const uint8_t data[8]);
 
