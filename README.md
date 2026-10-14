@@ -214,19 +214,26 @@ DJI 在构造时检查同一总线上的重复 `id1`，并自动登记发送槽�
 
 ### 最小接入样例
 
-以下使用 FDCAN1；bxCAN 项目改用自己的 HAL CAN 句柄。函数须在 HAL 初始化之后调用一次。
+以下使用 FDCAN1；bxCAN 项目改用自己的 HAL CAN 句柄。所有构造入口都须在 HAL 初始化完成后调用。
 
 ```cpp
 #include "fdcan.h"
 #include "dji.hpp"
 
-// 板级在 HAL 初始化完成之后调用一次。Can 与电机都放进函数内静态存储：二者在首次调用时构造，
-// 并一直存活到程序结束，因此返回的引用在整个运行期都有效。
+// 板级在 HAL 初始化完成后首次调用。这里只构造 Can，不创建电机、不配置过滤器、也不启动总线。
+// Can 放进函数内静态存储，首次调用时构造并一直存活到程序结束，返回的引用在整个运行期有效。
 bsp::can::Can& motor_can_init()
 {
-    // 先构造 Can，再构造电机：电机构造时会通过 Can::register_callback 注册成员回调，
-    // 所以 Can 必须比所有电机活得更久。
     static bsp::can::Can motor_can{hfdcan1};
+    return motor_can;
+}
+
+// 独立的最小 DJI 示例：在 HAL 初始化后调用一次，不与下文控制样例的初始化流程混用。
+void motor_demo_init()
+{
+    bsp::can::Can& motor_can = motor_can_init();
+
+    // 总线已构造但尚未启动；静态电机在构造时注册回调，并保持到程序结束。
 
     static motors::DJIMotor motor({
             .can = motor_can,
@@ -238,15 +245,13 @@ bsp::can::Can& motor_can_init()
         Error_Handler();
     if (motor_can.start() != bsp::can::Status::Ok)
         Error_Handler();
-
-    // 把总线引用交给调用方保存；后续所有 init / task 都通过它借用这条总线。
-    return motor_can;
 }
 ```
 
-调用方（板级初始化）只需保存返回值，例如 `bsp::can::Can& motor_can = motor_can_init();`，再把同一个
-引用传给下面各样例的 `*_init(can)` / `*_task_1khz(can)`。这样既避免了跨文件全局对象带来的静态初始化
-顺序问题，也不需要额外的单例访问器或 `optional` 包装。
+仅运行最小 DJI 示例时，板级在 HAL 初始化后调用一次 `motor_demo_init()`；它会构造示例电机、配置过滤器并启动总线。
+使用下文控制样例时，不调用 `motor_demo_init()`，而是先保存 `bsp::can::Can& motor_can = motor_can_init();`。
+此时总线尚未启动，也没有隐式创建 DJI 电机；将引用传给所有需要的 `*_init(can)`，完成电机和过滤器初始化后，
+再检查 `motor_can.start()` 的返回值，最后使能控制器并运行周期任务。启动后不能再调用创建电机的 `*_init(can)`。
 
 `CAN_FilterInit` 返回 `bsp::can::Status`，调用方必须检查结果。各协议的过滤条件如下：
 
@@ -263,12 +268,10 @@ FDCAN 的过滤器数量与 FIFO0 资源须在 HAL 初始化前分配；未匹�
 `Can::configure_filter(bsp::can::GlobalFilter{})` 策略决定。bxCAN 的 CAN1/CAN2 bank 分界由
 `CAN_DRIVER_BXCAN_CAN2_START_BANK` 统一配置，且两路过滤器都须在任一路启动前配置。
 
-下文各控制样例是独立的接入示例。板级先完成 HAL 初始化，再构造 `Can`（例如最小样例里
-`motor_can_init()` 的函数内静态对象），并以 `bsp::can::Can&` 的形式持有它；每个样例的 `*_init(can)`
-都通过参数借用这条已初始化的总线，而不是引用一个隐式全局。对同一条总线，先依次调用所有需要的
-`*_init(can)`，再配置过滤器并 `start()`，最后才调用相应的 `*_start()` 使能控制器或发送命令。
-函数内静态的 `Can` 与电机都存活到程序结束，这些引用在整个运行期始终有效；反过来，已经 `start()`
-的总线不能再追加构造电机，所以务必先把该总线上所有电机建好、再启动。
+下文各控制样例通过 `bsp::can::Can&` 参数借用板级总线，不引用隐式全局，也不运行独立的 `motor_demo_init()`。
+板级先完成 HAL 初始化，再调用仅构造总线的 `motor_can_init()` 并持有返回的引用；依次调用所有需要的 `*_init(can)`，
+然后配置过滤器并检查 `start()` 的结果，成功后才调用相应的 `*_start()` 使能控制器或发送命令。
+函数内静态的 `Can` 存活到程序结束；所有电机也必须覆盖总线的使用期。已经启动的总线不能追加构造电机。
 
 ## 调用样例
 
