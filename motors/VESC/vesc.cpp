@@ -7,6 +7,7 @@
 #include "vesc.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 
@@ -125,7 +126,9 @@ void VESCMotor::setInternalVelocity(const float rpm, const float maxi)
     sendSetCommand(SetCommand::SetRPM, rpm);
 }
 
-void VESCMotor::decode(const StatusCommand status_cmd, const uint8_t data[8])
+// 前置条件：调用方（on_can）已确认 status_cmd 受支持，且 data 至少覆盖该状态包用到的
+// 字段——状态 1~4 为 8 字节，状态 5 为 6 字节。本函数不做边界检查。
+void VESCMotor::decode(const StatusCommand status_cmd, const uint8_t* data)
 {
     // TODO: vesc 大概率会做降频处理，此处需要支持自定义超时时间
     watchdog_.feed();
@@ -190,17 +193,39 @@ void VESCMotor::decode(const StatusCommand status_cmd, const uint8_t data[8])
 
 void VESCMotor::on_can(const bsp::can::FrameView& frame) noexcept
 {
-    // VESC 全部报文都是经典格式的扩展数据帧，状态反馈固定 8 字节负载。
+    // VESC 全部报文都是经典格式的扩展数据帧。
     if (frame.header.id_type != bsp::can::IdType::Extended ||
         frame.header.format != bsp::can::FrameFormat::Classic ||
-        frame.header.type != bsp::can::FrameType::Data || frame.data.size() != 8)
+        frame.header.type != bsp::can::FrameType::Data)
         return;
 
     // 扩展帧 ID 高字节是状态类型，低字节是控制器 ID。
     if (static_cast<uint8_t>(frame.header.id & 0xFFU) != cfg_.id)
         return;
 
-    decode(static_cast<StatusCommand>((frame.header.id >> 8) & 0xFFU), frame.data.data());
+    const auto status_cmd = static_cast<StatusCommand>((frame.header.id >> 8) & 0xFFU);
+
+    // 只处理本实现能解码的状态包：未知状态在这里直接丢弃，既不进入解码，也不喂狗。
+    std::size_t required_length = 0U;
+    switch (status_cmd)
+    {
+    case StatusCommand::VESC_CAN_STATUS_1:
+    case StatusCommand::VESC_CAN_STATUS_2:
+    case StatusCommand::VESC_CAN_STATUS_3:
+    case StatusCommand::VESC_CAN_STATUS_4: required_length = 8U; break;
+    case StatusCommand::VESC_CAN_STATUS_5:
+        // 状态 5 的协议负载只有 6 字节：4 字节转速计 + 2 字节输入电压。
+        required_length = 6U;
+        break;
+    default: return;
+    }
+
+    // 负载必须覆盖该状态包用到的字段，且不超过经典 CAN 的 8 字节上限：状态 1~4 仍要求
+    // 8 字节，状态 5 接受协议 DLC 6，也兼容 DLC 7/8 的补齐帧（多出的字节不会被读取）。
+    if (frame.data.size() < required_length || frame.data.size() > 8U)
+        return;
+
+    decode(status_cmd, frame.data.data());
 }
 
 bsp::can::Status VESCMotor::CAN_FilterInit(bsp::can::Can& can, const uint32_t filter_index)

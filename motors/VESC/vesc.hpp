@@ -104,13 +104,14 @@ public:
         /**
          * 状态包 5
          *
-         * 数据布局：
+         * 数据布局（协议只定义 6 字节负载，不存在 Data[6..7]）：
          * - Data[0..3]：转速计原始值 `Tachometer Value`，`int32`
          *   当前项目仅按原始计数保存，其精确物理含义仍带推测成分
          * - Data[4..5]：输入电压 * 10，`int16`
-         * - Data[6..7]：保留字段
+         *
+         * 接收时接受协议 DLC 6，也兼容 DLC 7/8 的补齐帧；多出的字节不会被读取。
          */
-        VESC_CAN_STATUS_5 = 27U, ///< 输入电压与转速计原始值
+        VESC_CAN_STATUS_5 = 27U, ///< 输入电压与转速计原始值（协议 6 字节负载）
     };
 
     /**
@@ -249,17 +250,24 @@ private:
      * @brief 总线接收回调，构造时注册到 `cfg_.can`
      * @param frame 一帧只读视图；仅在回调内有效，ISR 上下文同步调用
      *
-     * 只处理属于本对象的状态反馈帧：扩展帧、经典数据帧、8 字节负载，且扩展 ID
-     * 低字节等于 `Config::id`。
+     * 只处理属于本对象的、受支持的状态反馈帧：扩展帧、经典数据帧，且扩展 ID 低字节
+     * 等于 `Config::id`。
+     *
+     * 负载长度按状态包分别校验：状态 1~4 需要 8 字节；状态 5 协议的负载为 6 字节，
+     * 因此还接受 DLC 7/8 的补齐帧（多出的字节不会被读取）。长度不足、超过经典 CAN
+     * 的 8 字节上限，或状态号不受支持的帧一律丢弃：既不进入解码，也不喂狗。
      */
     void on_can(const bsp::can::FrameView& frame) noexcept;
 
     /**
      * @brief 解码状态反馈
-     * @param status_cmd 状态指令
-     * @param data 数据，至少 8 字节
+     * @param status_cmd 状态指令；调用方须已确认其属于本实现支持的状态包
+     * @param data 数据指针；调用方须保证其长度覆盖该状态包用到的字段
+     *             （状态 1~4 为 8 字节，状态 5 为 6 字节）
+     *
+     * 只在调用方完成负载长度校验后调用，本函数自身不做边界检查。
      */
-    void decode(StatusCommand status_cmd, const uint8_t data[8]);
+    void decode(StatusCommand status_cmd, const uint8_t* data);
 
     /**
      * @brief 限幅
