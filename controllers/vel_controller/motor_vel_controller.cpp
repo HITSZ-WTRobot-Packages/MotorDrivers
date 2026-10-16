@@ -4,7 +4,7 @@
  * @date    2026-01-28
  * @brief   通用速度控制器实现
  */
-#include "motor_vel_controller.hpp"
+#include "../motor_vel_controller.hpp"
 #include <algorithm>
 
 namespace controllers

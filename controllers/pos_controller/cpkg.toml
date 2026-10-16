@@ -1,4 +1,4 @@
-name = "Controller"
-pkgname = "MotorDrivers::Controller"
+name = "PosController"
+pkgname = "MotorController::PosController"
 version = "0.1.0"
 dependencies = ["MotorDrivers::Core", "libs::PIDMotor"]

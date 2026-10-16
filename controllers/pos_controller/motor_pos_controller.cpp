@@ -4,7 +4,7 @@
  * @date    2026-01-28
  * @brief   通用位置控制器实现
  */
-#include "motor_pos_controller.hpp"
+#include "../motor_pos_controller.hpp"
 #include <algorithm>
 
 namespace controllers
