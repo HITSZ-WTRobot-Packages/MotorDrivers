@@ -18,7 +18,7 @@
  */
 #pragma once
 
-#include "can_driver.h"
+#include "can_driver.hpp"
 #include "motor_if.hpp"
 #include "watchdog.hpp"
 
@@ -29,10 +29,15 @@ namespace motors
  * @brief DJI 电机对象
  *
  * 负责：
- * - 注册到某条 CAN 总线的反馈映射表
+ * - 构造时按 `Config.id1` 自动登记到所在 `bsp::can::Can` 总线的固定发送槽位，
+ *   并注册本对象的成员接收回调（接收只由总线广播，不经过发送槽位）
  * - 解析 0x201 ~ 0x208 的反馈报文
  * - 保存零点、圈数、速度等状态
  * - 提供聚合发送所需的目标电流缓存
+ *
+ * 生命周期：`bsp::can::Can` 不支持注销回调，因此本对象必须在所在总线
+ * `Can::start()` 之前构造，并存活到该总线不再使用为止；析构只释放发送槽位，
+ * 不注销接收回调。本类不可复制、不可移动，因为回调借用本对象地址。
  */
 class DJIMotor final : public IMotor
 {
@@ -64,9 +69,9 @@ public:
      */
     struct Config
     {
-        CAN_HandleTypeDef* hcan; ///< 所在 CAN 总线
-        Type               type; ///< 电机类型
-        uint8_t            id1;  ///< 电机编号，范围 1~8，对应反馈 ID 0x201 ~ 0x208
+        bsp::can::Can& can;  ///< 所在 CAN 总线（借用，须比本对象长寿）
+        Type           type; ///< 电机类型
+        uint8_t        id1;  ///< 电机编号，范围 1~8，对应反馈 ID 0x201 ~ 0x208
 
         bool  auto_zero      = true;  ///< 上电收够一段稳定反馈后，是否自动把当前角度设为零点
         bool  reverse        = false; ///< 是否把输出方向整体反向
@@ -74,7 +79,13 @@ public:
     };
 
     explicit DJIMotor(const Config& cfg);
+    /// 释放本对象在总线上的发送槽位；不注销接收回调（须在总线停止使用后调用）。
     ~DJIMotor() override;
+
+    DJIMotor(const DJIMotor&)            = delete;
+    DJIMotor& operator=(const DJIMotor&) = delete;
+    DJIMotor(DJIMotor&&)                 = delete;
+    DJIMotor& operator=(DJIMotor&&)      = delete;
 
     /**
      * @brief 获取输出轴角度
@@ -118,23 +129,37 @@ public:
 
     /**
      * @brief 初始化 DJI 反馈对应的 CAN 滤波器
+     *
+     * 必须在 `can.start()` 之前调用。`filter_index` 的含义随后端而定：bxCAN 为
+     * filter bank 编号，FDCAN 为所选标准/扩展过滤器数组内的 element 下标；两者
+     * 硬件布局不同，索引不可互换。
+     *
+     * @param can          目标 CAN 总线
+     * @param filter_index 过滤器资源索引（bxCAN bank / FDCAN element）
+     * @return 配置结果，成功为 `bsp::can::Status::Ok`
      */
-    static void CAN_FilterInit(CAN_HandleTypeDef* hcan, uint32_t filter_bank);
+    [[nodiscard]] static bsp::can::Status CAN_FilterInit(bsp::can::Can& can, uint32_t filter_index);
+
     /**
      * @brief 把某组 DJI 电机当前缓存的电流值打包发送到总线
-     */
-    static void SendIqCommand(CAN_HandleTypeDef* hcan, IqSetCMDGroup cmd_group);
-    /**
-     * @brief 统一的 CAN 接收入口
      *
-     * 如果项目里已经有统一 CAN 分发器，推荐把它注册到分发器中；否则也可以在 HAL 的 FIFO
-     * 回调里直接调用它。
+     * 发送槽位由各电机在构造时按 `id1` 自动登记，调用方无需提供电机列表。本函数
+     * 只读取本组对应的 4 个槽位：缺席、或未受控（`currentController() == nullptr`）
+     * 的槽位写零；即使在 `can` 上没有任何 DJI 电机，也会发送一帧全零电流。非法分组
+     * 返回 `InvalidFrame`，不影响任何有效分组的发送行为。
+     *
+     * @param can       目标 CAN 总线（须已完成 `start()`）
+     * @param cmd_group 分组
+     * @return 帧的受理结果；本函数不重试也不等待真正发送完成
      */
-    static void CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
-                                       const CAN_RxHeaderTypeDef* header,
-                                       const uint8_t*             data);
+    static bsp::can::SendResult SendIqCommand(bsp::can::Can& can, IqSetCMDGroup cmd_group);
 
 private:
+    /**
+     * @brief 总线接收回调：过滤出属于本对象的 0x200 + id1 反馈帧并解码
+     */
+    void on_can(const bsp::can::FrameView& frame) noexcept;
+
     Config cfg_; ///< 构造时保存的配置
 
     float angle_zero_ = 0; ///< 零点角度，单位 deg

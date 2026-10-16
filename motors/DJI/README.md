@@ -19,8 +19,8 @@
 对应到统一接口上：
 
 - `supportsCurrent() == true`
-- `supportsInternalVelocity() == false`
-- `supportsInternalPosition() == false`
+- `internalVelocitySupportLevel() == InternalVelocitySupportLevel::NotSupported`
+- `internalPositionSupportLevel() == InternalPositionSupportLevel::NotSupported`
 - `supportsInternalMIT() == false`
 - `defaultControlMode() == ExternalPID`
 
@@ -32,16 +32,33 @@
 
 当前实现的流程是：
 
-- 每个 `DJIMotor` 对象先缓存自己的目标电流
-- 然后由 `DJIMotor::SendIqCommand(...)` 把同一组里的 4 台电机一起打包发送
+- 电机构造时按 `Config::can` 和 `Config::id1` 自动登记到发送槽位。
+- 每条总线使用固定的 8 个 `std::array` 槽位（不使用 `BasicComponents` 的 `libs::FixedMap`），不分配堆内存。
+- 每个 `DJIMotor` 对象缓存自己的目标电流。
+- `DJIMotor::SendIqCommand(can, group)` 读取本组 4 个槽位，打包并发送；调用方无需维护电机列表。
 
-这是因为 DJI 标准协议一次报文能携带 4 台电机的电流命令，因此驱动里按两组处理：
+DJI 协议一次报文携带 4 台电机的电流命令，因此分为两组：
 
-- `IqCMDGroup_1_4`
-- `IqCMDGroup_5_8`
+- `IqCMDGroup_1_4`：`id1 = 1 ~ 4`，发送 ID `0x200`。
+- `IqCMDGroup_5_8`：`id1 = 5 ~ 8`，发送 ID `0x1FF`。
 
-如果一条总线上同时挂了 `id1 = 1 ~ 8` 的电机，通常需要每个控制周期分别对两组都调用一次
-`SendIqCommand(...)`。
+可在每个控制周期发送两组，这样修改电机的构造配置 `id1` 时，不需要修改发送任务：
+
+```cpp
+const auto result_1_4 = motors::DJIMotor::SendIqCommand(
+        can, motors::DJIMotor::IqSetCMDGroup::IqCMDGroup_1_4);
+const auto result_5_8 = motors::DJIMotor::SendIqCommand(
+        can, motors::DJIMotor::IqSetCMDGroup::IqCMDGroup_5_8);
+```
+
+缺少电机或未受控的槽位发送零电流；总线上没有 DJI 电机时也发送对应组的全零命令。
+同一总线上的重复 `id1` 会在构造时触发 `Error_Handler()`，不同总线可以使用相同 `id1`。
+发送登记最多支持 `CAN_DRIVER_MAX_INSTANCES` 条总线；注册接收回调失败不会提交发送槽位。
+返回值为 `bsp::can::SendResult`，受理或排队不代表已经在线上发送成功。
+
+发送槽位只用于组包，反馈仍由 `Can::register_callback` 注册的成员回调接收，不经过发送登记表。
+所有电机须在所属 `Can::start()` 前构造并保持存活；析构仅释放发送槽位，不注销接收回调。
+最后一台电机析构后释放该总线的发送登记容量。详见 [CAN 接入说明](../../README.md#can-接入方式)。
 
 ## ID 与反馈范围
 

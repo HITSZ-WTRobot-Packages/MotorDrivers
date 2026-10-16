@@ -6,69 +6,13 @@
  */
 #include "vesc.hpp"
 
-#include "FixedPointerMap.hpp"
-#include "can_driver.h"
-
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace motors
 {
-
-// 一条 CAN 总线对应一张 VESC id -> 电机对象的映射表。
-struct FeedbackMap
-{
-    CAN_HandleTypeDef*                                      hcan = nullptr;
-    FixedPointerMap<size_t, VESCMotor, MOTORS_VESC_MAX_NUM> motors{};
-};
-
-static std::array<FeedbackMap, CAN_NUM> map{};
-
-static FeedbackMap* find_map(const CAN_HandleTypeDef* hcan)
-{
-    for (auto& m : map)
-    {
-        if (m.hcan == hcan)
-            return &m;
-    }
-    return nullptr;
-}
-
-static bool register_motor(CAN_HandleTypeDef* hcan, const size_t id, VESCMotor* motor)
-{
-    if (!hcan || !motor)
-        return false;
-
-    FeedbackMap* m = find_map(hcan);
-    if (!m)
-    {
-        for (auto& slot : map)
-        {
-            if (slot.hcan == nullptr)
-            {
-                slot.hcan = hcan;
-                m         = &slot;
-                break;
-            }
-        }
-        if (!m)
-            return false;
-    }
-
-    return m->motors.insert(id, motor);
-}
-
-static bool unregister_motor(CAN_HandleTypeDef* hcan, const size_t id)
-{
-    if (!hcan)
-        return false;
-
-    const auto m = find_map(hcan);
-    if (!m)
-        return false;
-
-    return m->motors.erase(id);
-}
 
 // VESC 状态反馈里的多字节数据使用大端格式。
 static int32_t be_to_i32(const uint8_t* bytes)
@@ -96,13 +40,10 @@ VESCMotor::VESCMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f 
     inv_reduction_rate_ = 1.0f / cfg_.reduction_rate;
     erpm2velocity_      = inv_reduction_rate_ / static_cast<float>(cfg_.electrodes);
 
-    if (!register_motor(cfg_.hcan, cfg_.id, this))
+    // 总线按“注册时借用的对象地址”回调，故必须在 Can::start() 之前注册；
+    // 全项目统一约定：本对象须活到该总线不再使用，不提供注销接口。
+    if (cfg_.can.register_callback<&VESCMotor::on_can>(*this) != bsp::can::Status::Ok)
         Error_Handler();
-}
-
-VESCMotor::~VESCMotor()
-{
-    unregister_motor(cfg_.hcan, cfg_.id);
 }
 
 void VESCMotor::resetAngle()
@@ -156,23 +97,22 @@ void VESCMotor::sendSetCommand(const SetCommand cmd, const float value) const
         return;
     }
 
-    // 标准 VESC 设置帧只使用前 4 个字节传数值。
-    const uint8_t data[8] = { static_cast<uint8_t>(data_value >> 24),
-                              static_cast<uint8_t>(data_value >> 16),
-                              static_cast<uint8_t>(data_value >> 8),
-                              static_cast<uint8_t>(data_value),
-                              0x00,
-                              0x00,
-                              0x00,
-                              0x00 };
+    // 标准 VESC 设置帧只使用前 4 个字节传数值，DLC 为 4。
+    const std::array<uint8_t, 4> data{ static_cast<uint8_t>(data_value >> 24),
+                                       static_cast<uint8_t>(data_value >> 16),
+                                       static_cast<uint8_t>(data_value >> 8),
+                                       static_cast<uint8_t>(data_value) };
 
-    CAN_TxHeaderTypeDef tx_header{};
-    tx_header.ExtId = (static_cast<uint32_t>(cmd) << 8) | cfg_.id;
-    tx_header.IDE   = CAN_ID_EXT;
-    tx_header.RTR   = CAN_RTR_DATA;
-    tx_header.DLC   = 4;
+    const bsp::can::FrameView frame{
+        .header = { .id      = (static_cast<uint32_t>(cmd) << 8) | cfg_.id,
+                    .id_type = bsp::can::IdType::Extended,
+                    .format  = bsp::can::FrameFormat::Classic,
+                    .type    = bsp::can::FrameType::Data },
+        .data   = std::span<const uint8_t>{ data }
+    };
 
-    CAN_SendMessage(cfg_.hcan, &tx_header, data);
+    // 与旧实现一致：命令接口无返回值，发送结果交由总线侧诊断处理，不做重试。
+    (void)cfg_.can.send(frame);
 }
 
 void VESCMotor::setCurrent(const float current)
@@ -186,7 +126,9 @@ void VESCMotor::setInternalVelocity(const float rpm, const float maxi)
     sendSetCommand(SetCommand::SetRPM, rpm);
 }
 
-void VESCMotor::decode(const StatusCommand status_cmd, const uint8_t data[8])
+// 前置条件：调用方（on_can）已确认 status_cmd 受支持，且 data 至少覆盖该状态包用到的
+// 字段——状态 1~4 为 8 字节，状态 5 为 6 字节。本函数不做边界检查。
+void VESCMotor::decode(const StatusCommand status_cmd, const uint8_t* data)
 {
     // TODO: vesc 大概率会做降频处理，此处需要支持自定义超时时间
     watchdog_.feed();
@@ -249,42 +191,54 @@ void VESCMotor::decode(const StatusCommand status_cmd, const uint8_t data[8])
         resetAngle();
 }
 
-void VESCMotor::CAN_FilterInit(CAN_HandleTypeDef* hcan, const uint32_t filter_bank)
+void VESCMotor::on_can(const bsp::can::FrameView& frame) noexcept
 {
-    const CAN_FilterTypeDef filter = { .FilterIdHigh         = 0x0000,
-                                       .FilterIdLow          = 0x0000 | CAN_ID_EXT,
-                                       .FilterMaskIdHigh     = 0x0000,
-                                       .FilterMaskIdLow      = 0x0000 | CAN_ID_EXT,
-                                       .FilterFIFOAssignment = CAN_FILTER_FIFO0,
-                                       .FilterBank           = filter_bank,
-                                       .FilterMode           = CAN_FILTERMODE_IDMASK,
-                                       .FilterScale          = CAN_FILTERSCALE_32BIT,
-                                       .FilterActivation     = ENABLE,
-                                       .SlaveStartFilterBank = 14 };
-
-    if (HAL_CAN_ConfigFilter(hcan, &filter) != HAL_OK)
-        Error_Handler();
-}
-
-void VESCMotor::CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
-                                       const CAN_RxHeaderTypeDef* header,
-                                       const uint8_t*             data)
-{
-    if (!hcan || !header || !data || header->IDE != CAN_ID_EXT)
-        return;
-
-    const auto m = find_map(hcan);
-    if (!m)
-        return;
-
-    const auto id    = static_cast<uint8_t>(header->ExtId & 0xFF);
-    const auto motor = m->motors.find(id);
-    if (!motor)
+    // VESC 全部报文都是经典格式的扩展数据帧。
+    if (frame.header.id_type != bsp::can::IdType::Extended ||
+        frame.header.format != bsp::can::FrameFormat::Classic ||
+        frame.header.type != bsp::can::FrameType::Data)
         return;
 
     // 扩展帧 ID 高字节是状态类型，低字节是控制器 ID。
-    const auto status_cmd = static_cast<StatusCommand>((header->ExtId >> 8) & 0xFF);
-    motor->decode(status_cmd, data);
+    if (static_cast<uint8_t>(frame.header.id & 0xFFU) != cfg_.id)
+        return;
+
+    const auto status_cmd = static_cast<StatusCommand>((frame.header.id >> 8) & 0xFFU);
+
+    // 只处理本实现能解码的状态包：未知状态在这里直接丢弃，既不进入解码，也不喂狗。
+    std::size_t required_length = 0U;
+    switch (status_cmd)
+    {
+    case StatusCommand::VESC_CAN_STATUS_1:
+    case StatusCommand::VESC_CAN_STATUS_2:
+    case StatusCommand::VESC_CAN_STATUS_3:
+    case StatusCommand::VESC_CAN_STATUS_4: required_length = 8U; break;
+    case StatusCommand::VESC_CAN_STATUS_5:
+        // 状态 5 的协议负载只有 6 字节：4 字节转速计 + 2 字节输入电压。
+        required_length = 6U;
+        break;
+    default: return;
+    }
+
+    // 负载必须覆盖该状态包用到的字段，且不超过经典 CAN 的 8 字节上限：状态 1~4 仍要求
+    // 8 字节，状态 5 接受协议 DLC 6，也兼容 DLC 7/8 的补齐帧（多出的字节不会被读取）。
+    if (frame.data.size() < required_length || frame.data.size() > 8U)
+        return;
+
+    decode(status_cmd, frame.data.data());
+}
+
+bsp::can::Status VESCMotor::CAN_FilterInit(bsp::can::Can& can, const uint32_t filter_index)
+{
+    // VESC 只使用扩展帧。掩码为 0 表示不比较任何标识符位，即接受全部扩展帧
+    // （与旧实现“32 位掩码只比较 IDE 位”等价），命中后进入 FIFO0。
+    // index 由调用方沿用原有分配：bxCAN 为 filter bank，FDCAN 为 element 下标。
+    return can.configure_filter(bsp::can::IdFilter{ .index   = filter_index,
+                                                    .id_type = bsp::can::IdType::Extended,
+                                                    .mode    = bsp::can::FilterMode::Mask,
+                                                    .action  = bsp::can::FilterAction::Fifo0,
+                                                    .id1     = 0U,
+                                                    .id2     = 0U });
 }
 
 } // namespace motors

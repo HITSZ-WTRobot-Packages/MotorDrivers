@@ -5,18 +5,16 @@
  * @brief   达妙电机驱动实现
  *
  * 这里实现了：
- * - DM 报文到电机对象的映射
+ * - 反馈帧的接收过滤与解码（成员回调，由 `bsp::can::Can` 广播）
  * - 反馈数据到物理量的换算
  * - MIT / 位置 / 速度三种模式的指令打包
  */
 #include "dm.hpp"
-#include "can_driver.h"
-#include "FixedPointerMap.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstring>
+#include <span>
 
 #define DEG2RAD(__DEG__) ((__DEG__) * 3.14159265358979323846f / 180.0f)
 #define RAD2DEG(__RAD__) ((__RAD__) / 3.14159265358979323846f * 180.0f)
@@ -36,64 +34,8 @@ uint32_t operator|(const uint32_t& b, const DMMotor::Mode& a)
     return static_cast<uint32_t>(a) | b;
 }
 
-struct FeedbackMap
-{
-    CAN_HandleTypeDef*                                  hcan = nullptr;
-    FixedPointerMap<size_t, DMMotor, MOTORS_DM_MAX_NUM> motors{};
-};
-
-static std::array<FeedbackMap, CAN_NUM> map{};
-
-// 按当前库设计，DM 的 master_id 是全局统一值。
-// 这样可以简化回调分发和对象映射；代价是所有 DM 电机都必须共享同一个 master_id。
+// 按当前库设计，DM 的 master_id 是全局统一值，由 CAN_FilterInit 写入，接收回调据此判定。
 static uint32_t master_id_;
-
-static FeedbackMap* find_map(const CAN_HandleTypeDef* hcan)
-{
-    for (auto& m : map)
-    {
-        if (m.hcan == hcan)
-            return &m;
-    }
-    return nullptr;
-}
-
-// 注册电机：反馈回调会靠这张表把报文分发到具体对象。
-static bool register_motor(CAN_HandleTypeDef* hcan, const size_t id0, DMMotor* motor)
-{
-    if (!hcan || !motor)
-        return false;
-    FeedbackMap* m = find_map(hcan);
-    if (!m)
-    {
-        // 找空槽创建
-        for (auto& slot : map)
-        {
-            if (slot.hcan == nullptr)
-            {
-                slot.hcan = hcan;
-                m         = &slot;
-                break;
-            }
-        }
-        if (!m)
-            return false; // 没空槽
-    }
-    return m->motors.insert(id0, motor);
-}
-
-// 注销电机。
-static bool unregister_motor(CAN_HandleTypeDef* hcan, const size_t id0)
-{
-    if (!hcan)
-        return false;
-
-    const auto m = find_map(hcan);
-    if (!m)
-        return false;
-
-    return m->motors.erase(id0);
-}
 
 // 对于 S3519，傻逼达妙会返回减速前的位置；对于其他电机，返回减速后的
 static constexpr float get_inv_pos_reduction_rate(const DMMotor::Type type)
@@ -119,6 +61,9 @@ static constexpr float get_inv_vel_reduction_rate(const DMMotor::Type type)
 
 DMMotor::DMMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f : 1.0f)
 {
+    if (cfg_.can_fd_brs && !bsp::can::Can::SupportsFD)
+        Error_Handler();
+
     // id 仅低四位有效
     cfg_.id0 &= 0x0F;
 
@@ -129,13 +74,27 @@ DMMotor::DMMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f : 1.
 
     angle_zero_ = cfg_.default_angle_zero;
 
-    if (!register_motor(cfg_.hcan, cfg_.id0, this))
+    // 借用回调：本对象必须在 Can::start() 之前构造，并存活到该总线不再使用。
+    if (cfg_.can.register_callback<&DMMotor::on_can>(*this) != bsp::can::Status::Ok)
         Error_Handler();
 }
 
-DMMotor::~DMMotor()
+void DMMotor::on_can(const bsp::can::FrameView& frame) noexcept
 {
-    unregister_motor(cfg_.hcan, cfg_.id0);
+    const auto& header = frame.header;
+
+    // DM 反馈支持 Classic 和 CAN FD；硬件过滤器不比较 RTR，远程帧在此丢弃。
+    if (header.id_type != bsp::can::IdType::Standard || header.type != bsp::can::FrameType::Data)
+        return;
+
+    if (header.id != master_id_ || frame.data.size() != 8)
+        return;
+
+    // data[0] 高 4 位是状态 ERR，低 4 位是电机 ID；只消费属于自己的反馈。
+    if ((frame.data[0] & 0x0F) != cfg_.id0)
+        return;
+
+    decode(frame.data.data());
 }
 
 void DMMotor::resetAngle()
@@ -214,10 +173,10 @@ void DMMotor::setInternalVelocity(const float rpm, const float maxi)
     (void)maxi; // DM 速度模式协议不支持 maxi
     const float rps = sign_ * RPM2RPS(rpm) * cfg_.reduction_rate /
                       get_inv_vel_reduction_rate(cfg_.type);
-    const auto data = reinterpret_cast<const uint8_t*>(&rps);
 
-    const auto hdr = tx_header(4);
-    CAN_SendMessage(cfg_.hcan, &hdr, data);
+    // 速度模式报文负载为单个 float（rad/s），DLC = 4。
+    (void)cfg_.can.send(
+            { tx_header(), std::span{ reinterpret_cast<const uint8_t*>(&rps), sizeof(rps) } });
 }
 
 void DMMotor::setInternalPosition(float pos, const float maxv)
@@ -231,8 +190,7 @@ void DMMotor::setInternalPosition(float pos, const float maxv)
     memcpy(data, &pos, sizeof(float));
     memcpy(data + 4, &vel_limit_rps, sizeof(float));
 
-    const auto hdr = tx_header(8);
-    CAN_SendMessage(cfg_.hcan, &hdr, data);
+    (void)cfg_.can.send({ tx_header(), std::span<const uint8_t>{ data, sizeof(data) } });
 }
 
 /**
@@ -270,50 +228,26 @@ void DMMotor::setInternalMIT(const float t_ff, float p_ref, float v_ref, float k
                               static_cast<uint8_t>(kd_ << 4 | t >> 8),
                               static_cast<uint8_t>(t) };
 
-    const auto hdr = tx_header(8);
-    CAN_SendMessage(cfg_.hcan, &hdr, data);
+    (void)cfg_.can.send({ tx_header(), std::span<const uint8_t>{ data, sizeof(data) } });
 }
 
-void DMMotor::CAN_FilterInit(CAN_HandleTypeDef* hcan,
-                             const uint32_t     filter_bank,
-                             const uint32_t     master_id)
+bsp::can::Status DMMotor::CAN_FilterInit(bsp::can::Can& can,
+                                         const uint32_t filter_index,
+                                         const uint32_t master_id)
 {
+    // 全局统一的主机 ID：接收回调据此判断反馈帧是否属于本机。
     master_id_ = master_id;
-    CAN_FilterTypeDef filter{};
-    filter.FilterMode           = CAN_FILTERMODE_IDMASK;
-    filter.FilterScale          = CAN_FILTERSCALE_32BIT;
-    filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-    filter.FilterBank           = filter_bank;
-    filter.FilterActivation     = ENABLE;
-    filter.SlaveStartFilterBank = 14;
 
-    // standard id: 11-bit, left shift 5
-    filter.FilterIdHigh     = static_cast<uint16_t>(master_id << 5);
-    filter.FilterIdLow      = 0x0000;
-    filter.FilterMaskIdHigh = static_cast<uint16_t>(0x7FF << 5);
-    filter.FilterMaskIdLow  = 0xFFFF;
-    if (HAL_CAN_ConfigFilter(hcan, &filter) != HAL_OK)
-    {
-        Error_Handler();
-    }
-}
-
-void DMMotor::CANBaseReceiveCallback(const CAN_HandleTypeDef*   hcan,
-                                     const CAN_RxHeaderTypeDef* header,
-                                     const uint8_t*             data)
-{
-    if (!hcan)
-        return;
-    const auto m = find_map(hcan);
-    if (!m || !header || header->IDE != CAN_ID_STD || header->StdId != master_id_)
-        return;
-
-    // data[0] 高 4 位是状态 ERR，低 4 位是电机 ID。
-    const uint8_t id = data[0] & 0x0F;
-
-    auto motor = m->motors.find(id);
-    if (motor != nullptr)
-        motor->decode(data);
+    // 仅接收发给主机（master）的标准帧：id1 精确等于 master_id，掩码 0x7FF。
+    // can_driver2 的 index 语义随后端而定：bxCAN 为 filter bank 编号，FDCAN 为所选
+    // 标准 ID 过滤器数组内的 element 下标，两者不可互换。命中帧写入 FIFO0（沿用原约定）。
+    const bsp::can::IdFilter filter{ .index   = filter_index,
+                                     .id_type = bsp::can::IdType::Standard,
+                                     .mode    = bsp::can::FilterMode::Mask,
+                                     .action  = bsp::can::FilterAction::Fifo0,
+                                     .id1     = master_id,
+                                     .id2     = 0x7FFU };
+    return can.configure_filter(filter);
 }
 
 bool DMMotor::tryAcquireController(controllers::IController* ctrl)
@@ -343,23 +277,23 @@ void DMMotor::disable()
 }
 void DMMotor::sendEnableFrame() const
 {
-    const auto hdr = tx_header(8);
-    CAN_SendMessage(cfg_.hcan, &hdr, ENABLE_MSG);
+    (void)cfg_.can.send({ tx_header(), ENABLE_MSG });
 }
 void DMMotor::sendDisableFrame() const
 {
-    const auto hdr = tx_header(8);
-    CAN_SendMessage(cfg_.hcan, &hdr, DISABLE_MSG);
+    (void)cfg_.can.send({ tx_header(), DISABLE_MSG });
 }
 
-CAN_TxHeaderTypeDef DMMotor::tx_header(const uint8_t& DLC) const
+bsp::can::FrameHeader DMMotor::tx_header() const noexcept
 {
-    CAN_TxHeaderTypeDef hdr{};
-    hdr.StdId = cfg_.mode | cfg_.id0;
-    hdr.IDE   = CAN_ID_STD;
-    hdr.RTR   = CAN_RTR_DATA;
-    hdr.DLC   = DLC;
-    return hdr;
+    bsp::can::FrameHeader header{};
+    header.id      = cfg_.mode | cfg_.id0;
+    header.id_type = bsp::can::IdType::Standard;
+    header.format  = cfg_.can_fd_brs ? bsp::can::FrameFormat::Fd : bsp::can::FrameFormat::Classic;
+    header.type    = bsp::can::FrameType::Data;
+
+    header.bit_rate_switch = cfg_.can_fd_brs;
+    return header;
 }
 
 } // namespace motors
