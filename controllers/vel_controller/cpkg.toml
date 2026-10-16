@@ -1,0 +1,4 @@
+name = "VelController"
+pkgname = "MotorController::VelController"
+version = "0.1.0"
+dependencies = ["MotorDrivers::Core", "libs::PIDMotor"]
