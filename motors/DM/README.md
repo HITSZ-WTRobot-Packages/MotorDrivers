@@ -1,7 +1,6 @@
 # DM 驱动说明
 
-本页只说明 `motors/DM/` 这一路驱动自己的特点与约束。统一抽象、单位约定和最小调用样例，请先看
-[../../README.md](../../README.md)。
+本目录是 `MotorDrivers::DM` 包，身份与依赖见 [cpkg.toml](cpkg.toml)，依赖 `MotorDrivers::Core`、`bsp::CANDriver2`、`services::Watchdog`。全仓接入见 [根 README](../../README.md#can-接入方式)，统一能力与控制权见 [Core](../../core/README.md)。具体接口以 [dm.hpp 的 Doxygen](dm.hpp) 为准。
 
 ## 当前覆盖
 
@@ -33,6 +32,8 @@
 这也是为什么 `DM` 不会默认走 `InternalVelPos`：它不是“同一配置下既能发速度又能发位置”，而是驱动器固件
 当前被配置成哪一种解释方式，就只暴露那一类能力。
 
+宿主必须把电调实际模式与 `Config::mode` 配成一致；选择控制器模式不会自动修改电调固件模式。两个通用控制器即使使用 `InternalMIT`，也只走外部 PID 后调用 `setCurrent()`，不发送 MIT 五元组。直接使用五元组应由宿主协调控制权。
+
 ## CAN 帧格式
 
 `Config::can_fd_brs` 按电调自身的通信配置选择发送帧格式：
@@ -56,7 +57,7 @@ motors::DMMotor::Config cfg{
 };
 ```
 
-开启后要求 FDCAN 后端，以及板级 HAL 已配置 FD+BRS 模式和与电调一致的数据段位时序；
+开启后要求 FDCAN 后端，以及宿主通过 CubeMX 配置 HAL1 的 FD+BRS 模式和与电调一致的数据段位时序；驱动不提供外设重新初始化方案，也不保证已完整校验所有宿主配置。
 在 bxCAN 后端开启会在构造时触发 `Error_Handler()`，不会尝试发送 FD 帧。
 接收回调同时支持 Classic 与 FD 的标准 ID 数据帧，反馈仍须为 8 字节，且匹配 `master_id` 和自身 `id0`。
 
@@ -70,6 +71,8 @@ motors::DMMotor::Config cfg{
 每个电机通过 `Can::register_callback` 注册成员回调，先匹配标准帧的 `master_id`，再匹配
 `data[0]` 低 4 位的 `id0`；不再维护电机对象映射表。不同总线配置过滤器时也必须使用相同的 `master_id`。
 电机须在总线启动前构造，并保持存活到总线不再使用；详见 [CAN 接入说明](../../README.md#can-接入方式)。
+
+宿主负责分配过滤器资源。现有 `CAN_FilterInit` 会写入全局主机 ID，并实际配置精确匹配该标准 ID、进入 FIFO0 的硬件过滤器；不是只校验。必须在总线启动前完成并检查返回的 `bsp::can::Status`。索引是 bxCAN bank 或 FDCAN 标准过滤器 element，不可互换；不能因调用失败而假定全局主机 ID 未改变。配置校验与 CubeMX 边界的维护要求见根文档。
 
 ### 2. `id0` 建议使用 `0x09 ~ 0x0F`
 
@@ -102,7 +105,7 @@ motors::DMMotor::Config cfg{
 - 电机当前还没被控制器接管，你又希望它保持通信在线
 - 电机已被接管，但需要周期性确认并恢复使能状态
 
-如果控制器已经成功获取控制权，`tryAcquireController()` 会顺带尝试发送使能包。
+申请控制权时，驱动在检查控制权能否取得之前就可能尝试发送使能包，因此申请失败也不能当作“没有硬件副作用”的保证。释放控制权不会自动失能；现有 `enable()` 返回成功也不代表发送已受理或电机确认使能，宿主应结合反馈与故障状态判断。
 
 ## 单位与量程
 
