@@ -132,6 +132,17 @@ DJIMotor::~DJIMotor()
     }
 }
 
+void DJIMotor::selfProtect()
+{
+    // 钩子执行时状态可能尚未提交；直接清缓存，不能经过公开 setCurrent() 门控。
+    iq_cmd_ = 0;
+}
+
+void DJIMotor::selfDisable()
+{
+    selfProtect();
+}
+
 void DJIMotor::resetAngle()
 {
     feedback_.round_cnt = 0;
@@ -250,12 +261,15 @@ bsp::can::SendResult DJIMotor::SendIqCommand(bsp::can::Can& can, const IqSetCMDG
     // 未登记的总线视为没有电机，仍发送全零帧。
     const TxSlots* bus = find_tx_slots(can);
 
-    // 缺席或未受控的槽位保持零。
+    // 缺席、Protected 或 Disabled 的槽位保持零；Standalone 无需父控制器。
     uint8_t iq_data[8] = {};
     for (size_t j = 0; j < 4; ++j)
     {
         const DJIMotor* motor = bus != nullptr ? bus->slots[group_offset + j] : nullptr;
-        if (motor == nullptr || motor->currentController() == nullptr)
+        if (motor == nullptr)
+            continue;
+        const auto state = motor->state();
+        if (state != State::Standalone && state != State::Controlled)
             continue;
 
         const int16_t iq_cmd = motor->getIqCMD();

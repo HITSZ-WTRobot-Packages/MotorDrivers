@@ -16,15 +16,37 @@ MotorPosController::MotorPosController(motors::IMotor* motor, const Config& cfg)
 {
 }
 
-MotorPosController::~MotorPosController()
+void MotorPosController::selfProtect()
 {
-    if (motor_)
-        motor_->releaseController(this);
+    position_pid_.reset();
+    velocity_pid_.reset();
+    position_ref_           = motor_->getAngle();
+    max_velocity_           = kNoLimit;
+    pos_vel_prescaler_      = 0;
+    internal_set_prescaler_ = 0;
+
+    // 自身状态可能尚未提交；不要经 setRef() 的权限门建立保护参考。
+    if (ctrl_mode_ == ControlMode::InternalPos || ctrl_mode_ == ControlMode::InternalVelPos)
+        motor_->setInternalPosition(position_ref_, kNoLimit);
+    else if (ctrl_mode_ == ControlMode::InternalVel)
+        motor_->setInternalVelocity(0.0f, kNoLimit);
+    else
+        motor_->setCurrent(0.0f);
+}
+
+void MotorPosController::selfDisable()
+{
+    position_pid_.reset();
+    velocity_pid_.reset();
+    position_ref_           = 0.0f;
+    max_velocity_           = kNoLimit;
+    pos_vel_prescaler_      = 0;
+    internal_set_prescaler_ = 0;
 }
 
 void MotorPosController::update()
 {
-    if (!enabled() || !motor_)
+    if (!isEnabled())
         return;
 
     // 对于 InternalPos / InternalVelPos，位置控制器都直接走“发送位置指令”这一路。
@@ -74,7 +96,26 @@ void MotorPosController::update()
     motor_->setCurrent(output);
 }
 
-void MotorPosController::setRef(const float position, const float max_velocity)
+bool MotorPosController::setRef(const float position, const float max_velocity)
+{
+    if (!canAcceptReference())
+        return false;
+
+    applyReference(position, max_velocity);
+    return true;
+}
+
+bool MotorPosController::setRefFrom(const core::control::ControllerNode& source,
+                                    const float position, const float max_velocity)
+{
+    if (!canAcceptReferenceFrom(source))
+        return false;
+
+    applyReference(position, max_velocity);
+    return true;
+}
+
+void MotorPosController::applyReference(const float position, const float max_velocity)
 {
     max_velocity_ = max_velocity;
     position_ref_ = position;
@@ -82,8 +123,7 @@ void MotorPosController::setRef(const float position, const float max_velocity)
     // InternalPos / InternalVelPos 下，改参考值后立即补发一次位置指令，减少响应延迟。
     if (ctrl_mode_ == ControlMode::InternalVelPos || ctrl_mode_ == ControlMode::InternalPos)
     {
-        if (motor_)
-            motor_->setInternalPosition(position_ref_, max_velocity_);
+        motor_->setInternalPosition(position_ref_, max_velocity_);
     }
 }
 

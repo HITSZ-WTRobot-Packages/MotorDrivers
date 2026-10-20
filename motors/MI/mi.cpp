@@ -191,24 +191,39 @@ bool MIMotor::sendEnableDisable(const uint8_t comm_type, const uint8_t data0)
     return send_frame(comm_type, cfg_.master_id, data);
 }
 
-bool MIMotor::enable()
+bool MIMotor::selfEnable()
 {
     if (sendEnableDisable(3, 0))
     {
-        enabled_ = true;
+        enable_requested_ = true;
         return true;
     }
     return false;
 }
 
-bool MIMotor::disable(const bool clear_fault)
+void MIMotor::selfDisable()
 {
-    if (sendEnableDisable(4, clear_fault ? 1U : 0U))
-    {
-        enabled_ = false;
-        return true;
-    }
-    return false;
+    // 没有失败返回通道：发送拒绝必须遵守现有致命失败约定。
+    if (!sendEnableDisable(4, 0))
+        Error_Handler();
+    enable_requested_ = false;
+}
+
+void MIMotor::selfProtect()
+{
+    // 此时 Core 状态可能仍为 Disabled，不经过公开 set* 门控。
+    if (!sendMIT(0.0f, 0.0f, 0.0f, 0.0f, 0.0f))
+        Error_Handler();
+}
+
+bool MIMotor::clearFault()
+{
+    if (isEnabled())
+        return false;
+    const bool accepted = sendEnableDisable(4, 1);
+    if (accepted)
+        enable_requested_ = false;
+    return accepted;
 }
 
 bool MIMotor::setMechanicalZero()
@@ -218,7 +233,7 @@ bool MIMotor::setMechanicalZero()
 
 // ---- MIT 控制指令（Type 1） ----
 
-void MIMotor::setInternalMIT(const float t_ff, float p_ref, float v_ref, float kp, float kd)
+bool MIMotor::sendMIT(const float t_ff, float p_ref, float v_ref, float kp, float kd)
 {
     // 外部接口约定：t_ff 用 Nm，p_ref 用 deg，v_ref 用 deg/s，kp/kd 为标量。
     // 下发前先限幅，再应用方向符号，最后按协议量程换算为 uint16。
@@ -238,15 +253,21 @@ void MIMotor::setInternalMIT(const float t_ff, float p_ref, float v_ref, float k
     write_u16_be(&data[6], kd_u16);
 
     // data2（bit23~8 of ExtId）承载力矩值
-    (void)send_frame(1, tor_u16, data);
+    return send_frame(1, tor_u16, data);
+}
+
+void MIMotor::applyInternalMIT(const float t_ff, const float p_ref, const float v_ref,
+                               const float kp, const float kd)
+{
+    (void)sendMIT(t_ff, p_ref, v_ref, kp, kd);
 }
 
 // ---- 电流 / 力矩输入 ----
 
-void MIMotor::setCurrent(const float current)
+void MIMotor::applyCurrent(const float current)
 {
     // 纯力矩控制：Kp=Kd=0，仅写入力矩前馈
-    setInternalMIT(current, 0, 0, 0, 0);
+    applyInternalMIT(current, 0, 0, 0, 0);
 }
 
 // ---- 参数读写 ----
@@ -289,6 +310,11 @@ bool MIMotor::readParam(const uint16_t index, float& value)
 
 bool MIMotor::writeParam(const uint16_t index, const float value)
 {
+    // 参数目标也是运动命令，不能绕过公开 set* 的同一状态边界。
+    if ((index == 0x7006 || index == 0x700A || index == 0x7016) &&
+        !isStandalone() && !isControlled())
+        return false;
+
     uint8_t data[8] = { static_cast<uint8_t>(index & 0xFF),
                         static_cast<uint8_t>((index >> 8) & 0xFF),
                         0,
@@ -307,22 +333,6 @@ bool MIMotor::writeParam(const uint16_t index, const float value)
     }
 
     return send_frame(18, cfg_.master_id, data);
-}
-
-// ---- 控制权 ----
-
-bool MIMotor::tryAcquireController(controllers::IController* ctrl)
-{
-    // 获取控制权时同时使能电机
-    if (!enabled_)
-        enable();
-    return IMotor::tryAcquireController(ctrl);
-}
-
-void MIMotor::releaseController(controllers::IController* ctrl)
-{
-    // 交接控制权时不失能电机，保持运行状态
-    IMotor::releaseController(ctrl);
 }
 
 // ---- 反馈解码（Type 2） ----

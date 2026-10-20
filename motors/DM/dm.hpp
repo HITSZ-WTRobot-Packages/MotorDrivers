@@ -30,6 +30,10 @@ namespace motors
  * 反馈通过 `bsp::can::Can` 的成员回调接收：构造时即向 `cfg.can` 注册
  * `on_can`，因此本对象必须在 `Can::start()` 之前构造，并存活到该总线不再使用
  * （can_driver2 没有注销接口）。对象禁止复制与移动，避免回调借用旧地址。
+ *
+ * Core enable() 成功后根节点为 Protected；直接控制需 standalone()。公开 set* 仅在
+ * Standalone / Controlled 接受，不鉴别调用者。宿主须串行化生命周期、业务与周期发包，
+ * Core 状态快照不是业务锁。析构前必须显式 disable()；本驱动不在析构时自动释放。
  */
 class DMMotor : public IMotor
 {
@@ -66,7 +70,7 @@ public:
     /**
      * @brief 达妙反馈状态码
      */
-    enum class State : uint8_t
+    enum class DriverState : uint8_t
     {
         Disabled             = 0x0U, // 失能
         Enabled              = 0x1U, // 使能
@@ -101,7 +105,7 @@ public:
     };
 
     explicit DMMotor(const Config& cfg);
-    /// 析构不注销 CAN 回调（can_driver2 无 unregister），对象须存活至总线不再使用。
+    /// 析构前必须显式 disable；不注销 CAN 回调，对象须存活至总线不再使用。
     ~DMMotor() override = default;
 
     DMMotor(const DMMotor&)            = delete;
@@ -152,56 +156,20 @@ public:
     [[nodiscard]] bool isConnected() const override { return watchdog_.isFed(); }
 
     [[nodiscard]] bool supportsCurrent() const override { return cfg_.mode == Mode::MIT; }
-    /**
-     * @brief 低层输出接口
-     *
-     * 当 DM 运行在 MIT 模式时，这个接口会把 MIT 退化为力矩输入使用。
-     * 因此这里的入参语义应理解为力矩，单位 Nm。
-     */
-    void setCurrent(float current) override;
 
     [[nodiscard]] InternalVelocitySupportLevel internalVelocitySupportLevel() const override
     {
         return cfg_.mode == Mode::Vel ? InternalVelocitySupportLevel::RefOnly
                                       : InternalVelocitySupportLevel::NotSupported;
     }
-    /**
-     * @brief 发送内部速度参考
-     *
-     * 库设计上对外统一使用 rpm；DM 驱动内部会把它换算成协议要求的 rad/s。
-     * DM 速度模式协议不支持 maxi，该参数被忽略。
-     */
-    void setInternalVelocity(float rpm, float maxi) override;
 
     [[nodiscard]] InternalPositionSupportLevel internalPositionSupportLevel() const override
     {
         return cfg_.mode == Mode::Pos ? InternalPositionSupportLevel::RefAndMaxv
                                       : InternalPositionSupportLevel::NotSupported;
     }
-    /**
-     * @brief 发送内部位置参考
-     *
-     * 当前位置参考使用 deg；DM 协议内部会换算成 rad。
-     * maxv 单位 rpm，传 kNoLimit 时回退到 cfg_.vel_max_rad。
-     */
-    void setInternalPosition(float pos, float maxv) override;
 
     [[nodiscard]] bool supportsInternalMIT() const override { return cfg_.mode == Mode::MIT; }
-    /**
-     * @brief 发送 MIT 控制指令
-     *
-     * 当前实现约定：
-     * - `p_ref` 使用 deg
-     * - `v_ref` 使用 deg/s
-     * - `t_ff` 使用 Nm
-     *
-     * 这里的 `v_ref` 不是普通速度模式下的目标转速，而是 MIT 五元组里的速度参考项，通常和 `p_ref`
-     * 配套使用，可理解为 `p_ref` 的导数。
-     *
-     * 也正因为如此，`setInternalMIT()` 的单位约定和普通 `setInternalVelocity()` 不同：前者当前用
-     * `deg + deg/s` 这一组量，再在驱动内部换算成协议要求的 `rad + rad/s`。
-     */
-    void setInternalMIT(float t_ff, float p_ref, float v_ref, float kp, float kd) override;
 
     /**
      * @brief 初始化 DM 反馈的 CAN 滤波器
@@ -221,49 +189,73 @@ public:
                                                          uint32_t       filter_index,
                                                          uint32_t       master_id);
 
-    /**
-     * @brief 获取控制权时，同时尝试使能电机
-     */
-    bool tryAcquireController(controllers::IController* ctrl) override;
-    /**
-     * @brief 释放控制权
-     */
-    void releaseController(controllers::IController* ctrl) override;
-
-    /**
-     * @brief 发送使能报文
-     * @return 是否发送成功
-     */
-    bool enable();
-    /**
-     * @brief 发送失能报文
-     */
-    void disable();
-
-    void sendEnableFrame() const;
-    void sendDisableFrame() const;
-
+    /** @brief 一收一回保活；Disabled 时仅发送失能协议包，不改变 Core 生命周期。 */
     void ping() const
     {
-        // DM 是“一收一回”模式，未使能时库内有意使用失能包代替心跳包。
-        // 这样既能维持通信，又不会误使能电机。
-        if (!enabled_)
+        if (!isEnabled() || !enable_requested_)
             sendDisableFrame();
-        // 如果电机实际未使能，持续发送使能帧
-        if (enabled_ && feedback_.state == State::Disabled)
+        else if (feedback_.state == DriverState::Disabled)
             sendEnableFrame();
     }
 
     /**
-     * @brief 最近一次反馈出来的状态码
+     * @brief 最近一次驱动器反馈状态；不同于 Core 逻辑 state() 或软件使能请求标记
      */
-    [[nodiscard]] State state() const { return feedback_.state; }
+    [[nodiscard]] DriverState driverState() const { return feedback_.state; }
+
+protected:
+    // 钩子绕过公开 set* 状态门控；Core 提交状态前也必须建立安全输出。
+    /// 发送使能请求并乐观返回 true；不检查发送受理或等待反馈。
+    bool selfEnable() override;
+    /// 速度归零 / 位置保持 getAngle() 且沿用速度量程 / MIT 全零，直接调用 apply*。
+    void selfProtect() override;
+    /// 发送协议失能并清除软件请求标记；不操作 Core 父子生命周期。
+    void selfDisable() override;
+
+    /**
+     * @brief 低层输出接口
+     *
+     * 当 DM 运行在 MIT 模式时，这个接口会把 MIT 退化为力矩输入使用。
+     * 因此这里的入参语义应理解为力矩，单位 Nm。
+     */
+    void applyCurrent(float current) override;
+    /**
+     * @brief 发送内部速度参考
+     *
+     * 库设计上对外统一使用 rpm；DM 驱动内部会把它换算成协议要求的 rad/s。
+     * DM 速度模式协议不支持 maxi，该参数被忽略。
+     */
+    void applyInternalVelocity(float rpm, float maxi) override;
+    /**
+     * @brief 发送内部位置参考
+     *
+     * 当前位置参考使用 deg；DM 协议内部会换算成 rad。
+     * maxv 单位 rpm，传 kNoLimit 时回退到 cfg_.vel_max_rad。
+     */
+    void applyInternalPosition(float pos, float maxv) override;
+    /**
+     * @brief 发送 MIT 控制指令
+     *
+     * 当前实现约定：
+     * - `p_ref` 使用 deg
+     * - `v_ref` 使用 deg/s
+     * - `t_ff` 使用 Nm
+     *
+     * 这里的 `v_ref` 不是普通速度模式下的目标转速，而是 MIT 五元组里的速度参考项，通常和 `p_ref`
+     * 配套使用，可理解为 `p_ref` 的导数。
+     *
+     * 也正因为如此，`setInternalMIT()` 的单位约定和普通 `setInternalVelocity()` 不同：前者当前用
+     * `deg + deg/s` 这一组量，再在驱动内部换算成协议要求的 `rad + rad/s`。
+     */
+    void applyInternalMIT(float t_ff, float p_ref, float v_ref, float kp, float kd) override;
 
 private:
+    void sendEnableFrame() const;
+    void sendDisableFrame() const;
+
     Config cfg_; ///< 构造时保存的配置
 
-    bool enabled_{ false }; ///< DM 驱动器是否已发送使能报文
-                            ///< TODO: 这里通过 DM 反馈判定是否真的使能成功
+    bool enable_requested_{ false }; ///< 使能协议请求标记，不是 Core 状态或反馈运行状态
 
     uint32_t          feedback_count_ = 0; ///< 反馈计数，用于上电自动清零
     service::Watchdog watchdog_;
@@ -275,7 +267,7 @@ private:
         float temp_mos{ 0 };   ///< MOS 温度
         float temp_rotor{ 0 }; ///< 转子温度
 
-        State state{ 0 }; ///< 驱动器状态码
+        DriverState state{ DriverState::Disabled }; ///< 驱动器反馈状态码
 
         int32_t count{ 0 }; ///< 圈数累计，用于展开成连续角度
     } feedback_{};

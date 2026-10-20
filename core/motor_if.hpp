@@ -12,23 +12,25 @@
  * 设计上，`IMotor` 不直接按“某个具体电机型号”建模，而是按“能力”建模：
  * - 反馈能力：获取角度、速度、连接状态，重置零点
  * - 控制输入能力：电流 / 力矩、内部速度、内部位置、MIT
- * - 控制权能力：申请、释放、查询当前控制器
+ * - 生命周期能力：由 Core 管理保护态、直接控制态和父控制器关系
  *
  * 单位约定：
  * - 角度默认使用 deg
  * - 速度默认使用 rpm，除非变量名明确带有 `_rad`、`_rps` 等后缀
  * - 力矩默认使用 Nm
  * - `resetAngle()` 的含义是“把当前输出角度重新视作零点”
+ *
+ * Core 的状态/关系查询只是瞬时快照，不保证业务调用并发安全。宿主必须串行化生命周期操作、
+ * 业务命令和周期发包；不能把控制关系当作线程同步或硬件安全联锁。
+ * 所有电机和控制器销毁前必须显式完成 disable；析构不会自动释放控制关系。
  */
 #ifndef I_MOTOR_HPP
 #define I_MOTOR_HPP
+#include "IController.hpp"
+
+#include <array>
 #include <cassert>
 #include <limits>
-
-namespace motors
-{
-class IMotor;
-} // namespace motors
 
 namespace controllers
 {
@@ -47,8 +49,6 @@ enum class ControlMode
     InternalVelPos, ///< 同时支持发送速度指令与位置指令
     InternalMIT,    ///< 使用 MIT 格式一并发送位置、速度、刚度、阻尼和前馈
 };
-
-class IController;
 } // namespace controllers
 
 namespace motors
@@ -65,12 +65,17 @@ namespace motors
  * - `setInternalVelocity()`：驱动器的速度指令输入
  * - `setInternalPosition()`：驱动器的位置指令输入
  * - `setInternalMIT()`：一次发送更完整的 MIT 控制量
+ *
+ * 公开命令只在 Standalone 或 Controlled 状态下转发给驱动，不识别调用者来源；
+ * Disabled 和 Protected 状态下忽略命令。不支持的能力仍由默认 apply 实现忽略。
+ * 生命周期钩子必须直接调用 apply 或内部协议 helper，不能经过公开权限包装，
+ * 因为钩子执行时 Core 可能尚未提交新状态。
  */
-class IMotor
+class IMotor : public core::control::IController<0>
 {
 public:
-    IMotor() : controller_(nullptr) {}
-    virtual ~IMotor() = default;
+    IMotor() = default;
+    ~IMotor() override = default;
 
     /**
      * @brief 返回该电机推荐的默认控制模式
@@ -118,7 +123,12 @@ public:
      * @brief 下发最低层电流 / 力矩类输出
      * @param current 输出值，具体物理意义由驱动决定
      */
-    virtual void setCurrent(const float current) { (void)current; }
+    void setCurrent(const float current)
+    {
+        const auto current_state = state();
+        if (current_state == State::Standalone || current_state == State::Controlled)
+            applyCurrent(current);
+    }
 
     /**
      * 内部速度控制能力等级
@@ -144,10 +154,11 @@ public:
      * @param maxi 最大电流/力矩限制，传 kNoLimit 表示不限制；
      *             不支持 maxi 的电机会忽略该参数
      */
-    virtual void setInternalVelocity(const float rpm, const float maxi)
+    void setInternalVelocity(const float rpm, const float maxi)
     {
-        (void)rpm;
-        (void)maxi;
+        const auto current_state = state();
+        if (current_state == State::Standalone || current_state == State::Controlled)
+            applyInternalVelocity(rpm, maxi);
     }
 
     /**
@@ -173,10 +184,11 @@ public:
      * @param maxv 最大速度限制，单位 rpm，传 kNoLimit 表示不限制；
      *             不支持 maxv 的电机会忽略该参数
      */
-    virtual void setInternalPosition(const float pos, const float maxv)
+    void setInternalPosition(const float pos, const float maxv)
     {
-        (void)pos;
-        (void)maxv;
+        const auto current_state = state();
+        if (current_state == State::Standalone || current_state == State::Controlled)
+            applyInternalPosition(pos, maxv);
     }
 
     /**
@@ -192,41 +204,54 @@ public:
      * 在 MIT / 阻抗控制语义下，`v_ref` 往往是和 `p_ref` 配套使用的速度项，物理意义更接近
      * “位置参考的导数”。因此它的单位由具体驱动决定，特殊情况会在驱动注释里明确说明。
      */
-    virtual void setInternalMIT(float t_ff, float p_ref, float v_ref, float kp, float kd) {}
-
-    /**
-     * @brief 尝试让控制器获取该电机的控制权
-     *
-     * 一个电机同一时刻只允许被一个控制器接管，用来避免多个控制器同时写目标值。
-     */
-    virtual bool tryAcquireController(controllers::IController* ctrl)
+    void setInternalMIT(float t_ff, float p_ref, float v_ref, float kp, float kd)
     {
-        if (controller_ == nullptr)
-        {
-            controller_ = ctrl;
-            return true;
-        }
-        return controller_ == ctrl; // re-acquire allowed，允许同一个控制器重复申请
+        const auto current_state = state();
+        if (current_state == State::Standalone || current_state == State::Controlled)
+            applyInternalMIT(t_ff, p_ref, v_ref, kp, kd);
     }
-
-    /**
-     * @brief 释放控制权
-     */
-    virtual void releaseController(controllers::IController* ctrl)
-    {
-        if (controller_ == ctrl)
-            controller_ = nullptr;
-    }
-
-    /**
-     * @brief 当前持有该电机控制权的控制器
-     */
-    [[nodiscard]] controllers::IController* currentController() const { return controller_; }
 
     static constexpr float kNoLimit = std::numeric_limits<float>::max();
 
-private:
-    controllers::IController* controller_; ///< 当前持有控制权的控制器
+protected:
+    /** @brief 实际下发电流 / 力矩输出；参数单位与 setCurrent() 相同。 */
+    virtual void applyCurrent(const float current) { (void)current; }
+
+    /** @brief 实际下发内部速度指令；参数顺序和单位与 setInternalVelocity() 相同。 */
+    virtual void applyInternalVelocity(const float rpm, const float maxi)
+    {
+        (void)rpm;
+        (void)maxi;
+    }
+
+    /** @brief 实际下发内部位置指令；参数顺序和单位与 setInternalPosition() 相同。 */
+    virtual void applyInternalPosition(const float pos, const float maxv)
+    {
+        (void)pos;
+        (void)maxv;
+    }
+
+    /** @brief 实际下发 MIT 指令；参数顺序和单位与 setInternalMIT() 相同。 */
+    virtual void applyInternalMIT(float t_ff, float p_ref, float v_ref, float kp, float kd)
+    {
+        (void)t_ff;
+        (void)p_ref;
+        (void)v_ref;
+        (void)kp;
+        (void)kd;
+    }
+
+    /**
+     * @brief 直接建立驱动的安全保护输出，不释放控制关系或失能子节点。
+     * @note 必须遵守 Core self* 钩子约定，绕过公开命令的状态门禁。
+     */
+    void selfProtect() override = 0;
+
+    /**
+     * @brief 直接提交驱动停机并清理自身资源，不依赖已提交的逻辑状态。
+     * @note 必须遵守 Core self* 钩子约定；不得重入生命周期 API。
+     */
+    void selfDisable() override = 0;
 };
 } // namespace motors
 
@@ -240,12 +265,17 @@ namespace controllers
  * - 如何根据反馈计算输出
  * - 何时调用对应的电机接口发送命令
  *
- * 控制权申请、启停状态这些通用逻辑在基类里统一处理。
+ * Core 统一管理生命周期及控制关系；唯一候选子节点是构造时绑定的电机，必须非空。
+ * enable() 成功后根控制器处于 Protected，需要 standalone() 后才能通过 setRef() 接受参考；
+ * Controlled 状态只接受 setRefFrom() 显式声明的当前父节点来源，不鉴别真实调用者身份。
+ * Protected 状态下允许 update() 继续执行派生类已建立的安全参考。
+ * 派生类 selfProtect() 应清理参考、PID 和分频状态并立即建立安全输出；selfDisable()
+ * 只清理自身业务状态，不操作电机生命周期或控制关系。钩子不得重入生命周期 API。
  */
-class IController
+class IController : public core::control::IController<1>
 {
 public:
-    virtual ~IController() = default;
+    ~IController() override = default;
 
     /**
      * @brief 周期更新控制器
@@ -255,44 +285,6 @@ public:
     virtual void update() = 0;
 
     /**
-     * @brief 启用控制器，并尝试获取电机控制权
-     * @return 启用后是否成功持有电机
-     */
-    virtual bool enable()
-    {
-        if (!enabled_)
-        {
-            if (motor_)
-            {
-                if (motor_->tryAcquireController(this))
-                    enabled_ = true;
-            }
-            else
-            {
-                enabled_ = false;
-            }
-        }
-        return enabled_;
-    }
-
-    /**
-     * @brief 停用控制器，并释放已持有的电机
-     */
-    virtual void disable()
-    {
-        if (enabled_)
-        {
-            if (motor_)
-                motor_->releaseController(this);
-            enabled_ = false;
-        }
-    }
-    /**
-     * @brief 控制器当前是否处于启用状态
-     */
-    [[nodiscard]] bool enabled() const { return enabled_; }
-
-    /**
      * @brief 取得绑定的电机对象
      *
      * 用于直接从控制器读取电机相应数据，比如获取当前输出角度，输出速度等
@@ -300,16 +292,17 @@ public:
     [[nodiscard]] motors::IMotor* getMotor() const { return motor_; }
 
 protected:
-    IController(motors::IMotor* motor, const ControlMode ctrl_mode) : motor_(motor), enabled_(false)
+    /**
+     * @param motor 借用的非空电机；必须比本控制器存活更久，Core 拒绝空候选子节点。
+     * @param ctrl_mode 控制模式；Default 沿用驱动声明的默认模式。
+     */
+    IController(motors::IMotor* motor, const ControlMode ctrl_mode)
+        : core::control::IController<1>(std::array<core::control::ControllerNode*, 1>{ motor }),
+          motor_(motor)
     {
         // 解析最终控制模式：
         // - 用户选 Default：使用电机驱动自己的默认模式
         // - 用户显式指定：要求驱动明确声明支持该能力
-        if (motor_ == nullptr)
-        {
-            ctrl_mode_ = ControlMode::ExternalPID;
-            return;
-        }
         if (ctrl_mode == ControlMode::Default)
         {
             ctrl_mode_ = motor_->defaultControlMode();
@@ -349,11 +342,23 @@ protected:
             }
         }
     }
+
+    /** @brief 直接参考仅在 Standalone 接受；children 的持有关系由 Core 保证。 */
+    [[nodiscard]] bool canAcceptReference() const noexcept
+    {
+        return isStandalone();
+    }
+
+    /** @brief 受控参考仅接受显式声明的当前父节点，不检查电机持有关系或来源节点状态。 */
+    [[nodiscard]] bool canAcceptReferenceFrom(
+            const core::control::ControllerNode& source) const noexcept
+    {
+        return isControlled() && currentController() == &source;
+    }
+
+
     motors::IMotor* motor_;     ///< 绑定的电机对象
     ControlMode     ctrl_mode_; ///< 解析后的最终控制模式
-
-private:
-    bool enabled_; ///< 控制器是否已经成功持有电机
 };
 
 } // namespace controllers

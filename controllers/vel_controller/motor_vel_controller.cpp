@@ -14,15 +14,39 @@ MotorVelController::MotorVelController(motors::IMotor* motor, const Config& cfg)
 {
 }
 
-MotorVelController::~MotorVelController()
+bool MotorVelController::selfEnable()
 {
-    if (motor_)
-        motor_->releaseController(this);
+    // 使用已经解析过的模式；Default 解析为 InternalPos 时同样拒绝启用。
+    return ctrl_mode_ != ControlMode::InternalPos && IController::selfEnable();
+}
+
+void MotorVelController::selfProtect()
+{
+    pid_.reset();
+    velocity_target_         = 0.0f;
+    ff_                      = 0.0f;
+    max_current_             = kNoLimit;
+    internal_set_prescaler_  = 0;
+
+    // 自身状态可能尚未提交；不要经 setRef() 的权限门建立保护参考。
+    if (ctrl_mode_ == ControlMode::InternalVel || ctrl_mode_ == ControlMode::InternalVelPos)
+        motor_->setInternalVelocity(0.0f, kNoLimit);
+    else
+        motor_->setCurrent(0.0f);
+}
+
+void MotorVelController::selfDisable()
+{
+    pid_.reset();
+    velocity_target_        = 0.0f;
+    ff_                     = 0.0f;
+    max_current_            = kNoLimit;
+    internal_set_prescaler_ = 0;
 }
 
 void MotorVelController::update()
 {
-    if (!enabled() || !motor_)
+    if (!isEnabled())
         return;
 
     // 如果驱动器自己带速度环，就直接把目标速度交给驱动器，避免重复做外部 PID。
@@ -46,7 +70,26 @@ void MotorVelController::update()
     motor_->setCurrent(output);
 }
 
-void MotorVelController::setRef(const float velocity, const float max_current, const float ff)
+bool MotorVelController::setRef(const float velocity, const float max_current, const float ff)
+{
+    if (!canAcceptReference())
+        return false;
+
+    applyReference(velocity, max_current, ff);
+    return true;
+}
+
+bool MotorVelController::setRefFrom(const core::control::ControllerNode& source,
+                                    const float velocity, const float max_current, const float ff)
+{
+    if (!canAcceptReferenceFrom(source))
+        return false;
+
+    applyReference(velocity, max_current, ff);
+    return true;
+}
+
+void MotorVelController::applyReference(const float velocity, const float max_current, const float ff)
 {
     max_current_     = max_current;
     velocity_target_ = velocity;
@@ -55,8 +98,7 @@ void MotorVelController::setRef(const float velocity, const float max_current, c
     // 内部速度模式下，改参考值后立即发送一次，减少等待下个周期的迟滞。
     if (ctrl_mode_ == ControlMode::InternalVel || ctrl_mode_ == ControlMode::InternalVelPos)
     {
-        if (motor_)
-            motor_->setInternalVelocity(velocity_target_, max_current_);
+        motor_->setInternalVelocity(velocity_target_, max_current_);
     }
 }
 

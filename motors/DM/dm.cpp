@@ -140,7 +140,7 @@ void DMMotor::decode(const uint8_t data[8])
     feedback_.torque     = feedback_torque;
     feedback_.temp_mos   = static_cast<int8_t>(data[6]);
     feedback_.temp_rotor = static_cast<int8_t>(data[7]);
-    feedback_.state      = static_cast<State>((data[0] >> 4) & 0x0F);
+    feedback_.state      = static_cast<DriverState>((data[0] >> 4) & 0x0F);
     feedback_count_++;
 
     // --- calculate absolute angle and velocity considering reverse and reduction ---
@@ -162,13 +162,13 @@ void DMMotor::decode(const uint8_t data[8])
  * 设置低层输出
  * @param current 在 DM MIT 模式下，这里按力矩输入处理，单位 Nm
  */
-void DMMotor::setCurrent(const float current)
+void DMMotor::applyCurrent(const float current)
 {
     // MIT 可以退化成单独的力矩输入。
-    setInternalMIT(current, 0, 0, 0, 0);
+    applyInternalMIT(current, 0, 0, 0, 0);
 }
 
-void DMMotor::setInternalVelocity(const float rpm, const float maxi)
+void DMMotor::applyInternalVelocity(const float rpm, const float maxi)
 {
     (void)maxi; // DM 速度模式协议不支持 maxi
     const float rps = sign_ * RPM2RPS(rpm) * cfg_.reduction_rate /
@@ -179,7 +179,7 @@ void DMMotor::setInternalVelocity(const float rpm, const float maxi)
             { tx_header(), std::span{ reinterpret_cast<const uint8_t*>(&rps), sizeof(rps) } });
 }
 
-void DMMotor::setInternalPosition(float pos, const float maxv)
+void DMMotor::applyInternalPosition(float pos, const float maxv)
 {
     pos = sign_ * DEG2RAD(pos) * cfg_.reduction_rate / get_inv_pos_reduction_rate(cfg_.type);
 
@@ -201,7 +201,7 @@ void DMMotor::setInternalPosition(float pos, const float maxv)
  * @param kp Kp
  * @param kd Kd
  */
-void DMMotor::setInternalMIT(const float t_ff, float p_ref, float v_ref, float kp, float kd)
+void DMMotor::applyInternalMIT(const float t_ff, float p_ref, float v_ref, float kp, float kd)
 {
     // 先在 MCU 侧做一次限幅，避免把超量程数据打包进协议。
     // MIT 五元组里的 `v_ref` 不是普通速度模式的目标转速，而是与 `p_ref` 配套的速度项，
@@ -250,30 +250,35 @@ bsp::can::Status DMMotor::CAN_FilterInit(bsp::can::Can& can,
     return can.configure_filter(filter);
 }
 
-bool DMMotor::tryAcquireController(controllers::IController* ctrl)
+bool DMMotor::selfEnable()
 {
-    // DM 电机通常需要先发使能报文，控制器拿到控制权时顺带做一次使能。
-    if (!enabled_)
-        enable();
-    return IMotor::tryAcquireController(ctrl);
-}
-
-void DMMotor::releaseController(controllers::IController* ctrl)
-{
-    // 此处不在对电机失能处理，因为使用过程中的控制权往往是交接而不是释放，电机不应当失能
-    // disable();
-    IMotor::releaseController(ctrl);
-}
-bool DMMotor::enable()
-{
+    // 保留既有乐观语义：不据发送结果或硬件反馈判定使能成功。
     sendEnableFrame();
-    enabled_ = true;
+    enable_requested_ = true;
     return true;
 }
-void DMMotor::disable()
+
+void DMMotor::selfProtect()
+{
+    // 生命周期状态可能尚未提交，必须直接发送原协议输出。
+    switch (cfg_.mode)
+    {
+    case Mode::Vel:
+        applyInternalVelocity(0.0f, kNoLimit);
+        break;
+    case Mode::Pos:
+        applyInternalPosition(getAngle(), kNoLimit);
+        break;
+    case Mode::MIT:
+        applyInternalMIT(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+        break;
+    }
+}
+
+void DMMotor::selfDisable()
 {
     sendDisableFrame();
-    enabled_ = false;
+    enable_requested_ = false;
 }
 void DMMotor::sendEnableFrame() const
 {
