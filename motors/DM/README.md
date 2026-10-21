@@ -93,7 +93,7 @@ motors::DMMotor::Config cfg{
 
 `DMMotor` 继承 `core::control::IController<0>`。`enable()` 由 Core 管理：无控制者根使能成功后进入 `Protected`，不是立即接受运动目标；直接控制需再调用 `standalone()`。绑定控制器的电机由 Core 建立 `Controlled` 关系，不再提供 `tryAcquireController()` / `releaseController()`。公开 `setCurrent()`、`setInternalVelocity()`、`setInternalPosition()`、`setInternalMIT()` 继承统一包装，仅在 `Standalone` / `Controlled` 受理，不鉴别直接调用还是父控制器调用。
 
-保护钩子按 `Config::mode` 立即发送安全参考，绕过尚未提交的 Core 状态门控：速度模式发送 `0 rpm`；位置模式发送当前 `getAngle()`（`deg`），最大速度沿用原协议量程限制；MIT 模式五元组全零。失能钩子发送原协议失能帧，并清除本地使能请求标记。它们不启动总线、不注册回调，也不自行改变父子关系。
+保护钩子按 `Config::mode` 立即发送安全参考，绕过尚未提交的 Core 状态门控：速度模式发送 `0 rpm`；位置模式将当前 `getAngle()`（`deg`）完整逆换算，恢复软件零点并撤销跨圈展开，使目标对应当前原始反馈协议位置，最大速度沿用原协议量程限制；MIT 模式五元组全零。保位依赖有效反馈，软件归零不应变成前往协议零位的运动指令。失能钩子发送原协议失能帧，并清除本地使能请求标记。它们不启动总线、不注册回调，也不自行改变父子关系。
 
 DM 保留原有乐观使能语义：使能帧发出后钩子返回 `true`，不判断发送是否受理，也不等待硬件反馈；保护 / 失能发送同样沿用既有不检查发送结果的行为。本次不解决 DM 使能结果不确定问题，不能用 Core 的逻辑状态或返回值作为物理安全已落实的证明。
 
@@ -129,6 +129,8 @@ DM 保留原有乐观使能语义：使能帧发出后钩子返回 `true`，不�
 - 业务层调用 `getAngle()`、`getVelocity()`、`setInternalVelocity()` 时，仍按库统一约定理解
 - `setCurrent()` 在 `MIT` 模式下应理解成力矩输入，单位 `Nm`
 
+位置模式的 `setInternalPosition(pos, maxv)` 与 MIT 的 `p_ref` 均与 `getAngle()` 使用相同的软件零点和跨圈展开的输出轴坐标。`default_angle_zero`、`resetAngle()` 和自动归零只改变软件坐标，不修改电调零位；两个入口共用位置逆换算，恢复方向、外接减速比、型号位置比例、软件零点及当前圈数。因此，以当前 `getAngle()` 为参考表示当前反馈位置，位置控制器的保护参考与保护态周期更新也遵循这一约定。
+
 `setInternalMIT()` 需要特别说明：
 
 - 这里的 `p_ref` 和 `v_ref` 是一组 MIT 状态参考
@@ -137,10 +139,10 @@ DM 保留原有乐观使能语义：使能帧发出后钩子返回 `true`，不�
 
 也正因为语义不同，当前实现没有让 `setInternalMIT()` 复用普通速度接口的 `rpm` 约定，而是使用：
 
-- `p_ref` 按 `deg`
-- `v_ref` 按 `deg/s`
+- `p_ref` 按输出轴 `deg`，使用上述软件位置坐标
+- `v_ref` 按输出轴 `deg/s`，恢复方向、外接减速比及型号速度比例
 
-然后再由驱动内部换算成协议需要的 `rad` / `rad/s`。
+然后再换算成协议需要的 `rad` / `rad/s`，在协议坐标中限幅并编码。力矩与 `Kp/Kd` 仍保持协议口径，不随减速比缩放。纯力矩输入与 MIT 生命周期保护直接使用协议零位置、零速度及零增益，不经过业务目标的软件零点逆换算，原有保护策略不变。
 
 ## `S3519` 的位置反馈口径
 

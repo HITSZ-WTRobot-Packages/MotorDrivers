@@ -142,8 +142,8 @@ static uint16_t kd_to_raw(float kd)
 
 MIMotor::MIMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f : 1.0f)
 {
-    const float reduction_rate = cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f;
-    inv_reduction_rate_        = 1.0f / reduction_rate;
+    cfg_.reduction_rate = cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f;
+    inv_reduction_rate_ = 1.0f / cfg_.reduction_rate;
 
     if (cfg_.can.register_callback<&MIMotor::on_can>(*this) != bsp::can::Status::Ok)
         Error_Handler();
@@ -211,7 +211,7 @@ void MIMotor::selfDisable()
 
 void MIMotor::selfProtect()
 {
-    // 此时 Core 状态可能仍为 Disabled，不经过公开 set* 门控。
+    // 此时 Core 状态可能仍为 Disabled；绕过公开门控和软件坐标换算，发送协议零参考。
     if (!sendMIT(0.0f, 0.0f, 0.0f, 0.0f, 0.0f))
         Error_Handler();
 }
@@ -233,18 +233,15 @@ bool MIMotor::setMechanicalZero()
 
 // ---- MIT 控制指令（Type 1） ----
 
-bool MIMotor::sendMIT(const float t_ff, float p_ref, float v_ref, float kp, float kd)
+bool MIMotor::sendMIT(const float protocol_torque, const float protocol_position_deg,
+                      const float protocol_velocity_deg_s, const float kp, const float kd)
 {
-    // 外部接口约定：t_ff 用 Nm，p_ref 用 deg，v_ref 用 deg/s，kp/kd 为标量。
-    // 下发前先限幅，再应用方向符号，最后按协议量程换算为 uint16。
-    p_ref = std::clamp(p_ref, -kPosHalfDeg, kPosHalfDeg);
-    v_ref = std::clamp(DEG2RAD(v_ref), -MIMotor::kVelMaxRps, MIMotor::kVelMaxRps);
-
-    const uint16_t pos_u16 = pos_deg_to_raw(sign_ * p_ref);
-    const uint16_t vel_u16 = vel_rps_to_raw(sign_ * v_ref);
+    // 原始协议坐标打包层：不应用软件零点、方向或外接减速比；转换后按协议量程限幅。
+    const uint16_t pos_u16 = pos_deg_to_raw(protocol_position_deg);
+    const uint16_t vel_u16 = vel_rps_to_raw(DEG2RAD(protocol_velocity_deg_s));
     const uint16_t kp_u16  = kp_to_raw(kp);
     const uint16_t kd_u16  = kd_to_raw(kd);
-    const uint16_t tor_u16 = tor_nm_to_raw(sign_ * t_ff);
+    const uint16_t tor_u16 = tor_nm_to_raw(protocol_torque);
 
     uint8_t data[8];
     write_u16_be(&data[0], pos_u16);
@@ -259,15 +256,19 @@ bool MIMotor::sendMIT(const float t_ff, float p_ref, float v_ref, float kp, floa
 void MIMotor::applyInternalMIT(const float t_ff, const float p_ref, const float v_ref,
                                const float kp, const float kd)
 {
-    (void)sendMIT(t_ff, p_ref, v_ref, kp, kd);
+    // 逆转反馈的输出轴方向、有效减速比、软件零点和当前位置所在的展开分支。
+    const float protocol_position_deg = sign_ * p_ref * cfg_.reduction_rate + angle_zero_ -
+                                        static_cast<float>(feedback_.round_cnt) * kPosHalfDeg * 2.0f;
+    const float protocol_velocity_deg_s = sign_ * v_ref * cfg_.reduction_rate;
+    (void)sendMIT(sign_ * t_ff, protocol_position_deg, protocol_velocity_deg_s, kp, kd);
 }
 
 // ---- 电流 / 力矩输入 ----
 
 void MIMotor::applyCurrent(const float current)
 {
-    // 纯力矩控制：Kp=Kd=0，仅写入力矩前馈
-    applyInternalMIT(current, 0, 0, 0, 0);
+    // 纯力矩控制保留协议位置/速度零参考，不经过业务软件坐标换算。
+    (void)sendMIT(sign_ * current, 0, 0, 0, 0);
 }
 
 // ---- 参数读写 ----

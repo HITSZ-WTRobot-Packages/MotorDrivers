@@ -67,8 +67,9 @@ DMMotor::DMMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f : 1.
     // id 仅低四位有效
     cfg_.id0 &= 0x0F;
 
-    inv_reduction_rate_ = 1.0f / // 取倒数将除法转为乘法加快运算速度
-                          (cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f); // 外接减速比
+    // 保存与反馈一致的有效外接减速比，指令侧可直接复用乘法逆换算。
+    cfg_.reduction_rate = cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f;
+    inv_reduction_rate_ = 1.0f / cfg_.reduction_rate;
 
     pos_max_deg = RAD2DEG(cfg_.pos_max_rad);
 
@@ -164,8 +165,8 @@ void DMMotor::decode(const uint8_t data[8])
  */
 void DMMotor::applyCurrent(const float current)
 {
-    // MIT 可以退化成单独的力矩输入。
-    applyInternalMIT(current, 0, 0, 0, 0);
+    // 纯力矩必须使用协议零位置/速度，不受软件零点与展开圈数影响。
+    sendRawMIT(sign_ * current, 0, 0, 0, 0);
 }
 
 void DMMotor::applyInternalVelocity(const float rpm, const float maxi)
@@ -179,9 +180,21 @@ void DMMotor::applyInternalVelocity(const float rpm, const float maxi)
             { tx_header(), std::span{ reinterpret_cast<const uint8_t*>(&rps), sizeof(rps) } });
 }
 
+/**
+ * @brief 反解输出轴软件位置，恢复当前圈的绝对协议位置。
+ * @param output_deg 与 getAngle() 同零点、同展开坐标的输出轴位置，单位 deg
+ * @return 协议位置，单位 rad；不在此处限幅
+ */
+float DMMotor::toProtocolPosition(const float output_deg) const
+{
+    return DEG2RAD(sign_ * output_deg * cfg_.reduction_rate /
+                           get_inv_pos_reduction_rate(cfg_.type) +
+                   angle_zero_ - static_cast<float>(feedback_.count) * pos_max_deg * 2.0f);
+}
+
 void DMMotor::applyInternalPosition(float pos, const float maxv)
 {
-    pos = sign_ * DEG2RAD(pos) * cfg_.reduction_rate / get_inv_pos_reduction_rate(cfg_.type);
+    pos = toProtocolPosition(pos);
 
     const float vel_limit_rps =
             std::clamp(RPM2RPS(std::fabsf(maxv)), 0.0f, cfg_.vel_max_rad / cfg_.reduction_rate);
@@ -196,25 +209,33 @@ void DMMotor::applyInternalPosition(float pos, const float maxv)
 /**
  * MIT 控制指令
  * @param t_ff 前馈力矩
- * @param p_ref 位置参考，单位 deg
- * @param v_ref 速度参考，单位 deg/s
+ * @param p_ref 与 getAngle() 同软件零点、同展开坐标的输出轴位置，单位 deg
+ * @param v_ref 配套输出轴速度参考，单位 deg/s；不是普通速度模式的 rpm
  * @param kp Kp
  * @param kd Kd
  */
 void DMMotor::applyInternalMIT(const float t_ff, float p_ref, float v_ref, float kp, float kd)
 {
-    // 先在 MCU 侧做一次限幅，避免把超量程数据打包进协议。
-    // MIT 五元组里的 `v_ref` 不是普通速度模式的目标转速，而是与 `p_ref` 配套的速度项，
-    // 通常可以理解成位置参考的导数。因此这里按 deg/s -> rad/s 换算，而不是走 rpm 语义。
-    p_ref = std::clamp(DEG2RAD(p_ref), -cfg_.pos_max_rad, cfg_.pos_max_rad);
-    v_ref = std::clamp(DEG2RAD(v_ref), -cfg_.vel_max_rad, cfg_.vel_max_rad);
+    sendRawMIT(sign_ * t_ff,
+               toProtocolPosition(p_ref),
+               DEG2RAD(sign_ * v_ref * cfg_.reduction_rate /
+                       get_inv_vel_reduction_rate(cfg_.type)),
+               kp,
+               kd);
+}
+
+void DMMotor::sendRawMIT(const float t_ff, float p_ref, float v_ref, float kp, float kd)
+{
+    // 输入已是协议坐标；转换完成后再限幅，不再施加方向、减速比或软件零点。
+    p_ref = std::clamp(p_ref, -cfg_.pos_max_rad, cfg_.pos_max_rad);
+    v_ref = std::clamp(v_ref, -cfg_.vel_max_rad, cfg_.vel_max_rad);
     kp    = std::clamp(kp, 0.0f, 500.0f);
     kd    = std::clamp(kd, 0.0f, 5.0f);
 
     // DM MIT 协议本质上是把若干浮点物理量缩放后压成定长整数。
-    const auto p = static_cast<uint16_t>(sign_ * p_ref / cfg_.pos_max_rad * 32767.5f + 32767.5f);
-    const auto v = static_cast<uint16_t>(sign_ * v_ref / cfg_.vel_max_rad * 2047.5f + 2047.5f);
-    const auto t = static_cast<uint16_t>(sign_ * t_ff / cfg_.tor_max * 2047.5f + 2047.5f);
+    const auto p = static_cast<uint16_t>(p_ref / cfg_.pos_max_rad * 32767.5f + 32767.5f);
+    const auto v = static_cast<uint16_t>(v_ref / cfg_.vel_max_rad * 2047.5f + 2047.5f);
+    const auto t = static_cast<uint16_t>(t_ff / cfg_.tor_max * 2047.5f + 2047.5f);
 
     const auto kp_ = static_cast<uint16_t>(kp / 500.0f * 4095.0f);
     const auto kd_ = static_cast<uint16_t>(kd / 5.0f * 4095.0f);
@@ -270,7 +291,7 @@ void DMMotor::selfProtect()
         applyInternalPosition(getAngle(), kNoLimit);
         break;
     case Mode::MIT:
-        applyInternalMIT(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+        sendRawMIT(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
         break;
     }
 }

@@ -46,7 +46,8 @@ namespace motors
  * 当前库约定：
  * - 电机上电后默认处于 MIT 运控模式
  * - 角度对外统一使用 deg，速度使用 rpm，力矩使用 Nm
- * - MIT 接口的 v_ref 使用 deg/s（MIT 语义下的速度前馈，非普通转速指令）
+ * - MIT 位置沿用 getAngle() 的输出轴软件零点与展开坐标，速度前馈使用输出轴 deg/s
+ * - MIT 位置/速度逆转方向与外接减速后按协议量程限幅；力矩及 Kp/Kd 保留协议单位
  * - Core 根使能成功进入 Protected；独立运动须显式 standalone()
  * - 宿主串行化生命周期、业务与周期发包；Core 快照不保证业务并发安全
  * - 析构前必须显式 disable()，不能依赖析构自动释放控制关系
@@ -211,7 +212,7 @@ public:
 protected:
     /// Type 3 发送受理才返回 true，不等待设备运行反馈。
     bool selfEnable() override;
-    /// 绕过公开门控发送全零 MIT 五元组；被拒收则 Error_Handler()。
+    /// 绕过公开门控及软件坐标换算，发送协议全零 MIT 五元组；被拒收则 Error_Handler()。
     void selfProtect() override;
     /// 发送 Type 4 并清除使能请求标记；被拒收则 Error_Handler()。
     void selfDisable() override;
@@ -219,29 +220,39 @@ protected:
     /**
      * @brief 低层力矩输入
      *
-     * 在 MIT 模式下退化为纯力矩控制：发包时 Kp=Kd=0，仅写入力矩前馈。
-     * @param current 力矩，单位 Nm
+     * 在 MIT 模式下退化为纯力矩控制：协议位置/速度参考及 Kp/Kd 均为零。
+     * @param current 力矩，单位 Nm，仅应用方向符号，不按外接减速比缩放
      */
     void applyCurrent(float current) override;
     /**
      * @brief 发送 MIT 控制指令（Type 1）
      *
-     * 一次将位置、速度、力矩、刚度、阻尼打包下发。
+     * 位置与 getAngle() 共用输出轴软件零点和多圈展开坐标；发包时逆转方向、有效外接
+     * 减速比、零点及当前展开分支，再按协议量程限幅，不对越界目标另选跨圈分支。
      *
-     * 注意这里的 v_ref 不是普通速度模式下的目标转速，而是 MIT 五元组里的速度前馈项，
-     * 通常与 p_ref 配套使用，可理解为位置参考的导数。因此单位采用 deg/s 而非 rpm。
+     * v_ref 是输出轴位置参考的速度前馈，使用 deg/s 而非 getVelocity() 的 rpm，
+     * 同样逆转方向与有效外接减速比。力矩仅应用方向符号，Kp/Kd 不做坐标缩放。
      *
-     * @param t_ff 前馈力矩，单位 Nm，范围 -12 ~ +12
-     * @param p_ref 位置参考，单位 deg
-     * @param v_ref 速度参考，单位 deg/s（MIT 语义下的速度前馈）
+     * @param t_ff 前馈力矩，单位 Nm，协议范围 -12 ~ +12
+     * @param p_ref 输出轴位置参考，单位 deg，与 getAngle() 同坐标
+     * @param v_ref 输出轴速度参考，单位 deg/s（MIT 语义下的速度前馈）
      * @param kp 刚度，范围 0.0 ~ 500.0
      * @param kd 阻尼，范围 0.0 ~ 5.0
      */
     void applyInternalMIT(float t_ff, float p_ref, float v_ref, float kp, float kd) override;
 
 private:
-    // 返回发送受理结果，供无失败返回通道的安全钩子检查；普通业务保留原发送语义。
-    bool sendMIT(float t_ff, float p_ref, float v_ref, float kp, float kd);
+    /**
+     * @brief 原始协议坐标 MIT 打包层，不应用软件零点、方向或外接减速比
+     * @param protocol_torque 协议力矩，单位 Nm
+     * @param protocol_position_deg 协议量程内位置，单位 deg（越界时限幅）
+     * @param protocol_velocity_deg_s 协议速度，单位 deg/s（转 rad/s 后限幅）
+     * @param kp 协议刚度，范围 0.0 ~ 500.0
+     * @param kd 协议阻尼，范围 0.0 ~ 5.0
+     * @return 发送受理结果，供安全钩子检查；普通业务保留原发送语义
+     */
+    bool sendMIT(float protocol_torque, float protocol_position_deg,
+                 float protocol_velocity_deg_s, float kp, float kd);
 
     /**
      * @brief 总线接收回调，仅在 ISR 上下文调用

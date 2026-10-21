@@ -115,7 +115,7 @@ public:
 
     /**
      * @brief 获取输出轴角度
-     * @return 角度，单位 deg
+     * @return 相对软件零点、跨圈展开的输出轴角度，单位 deg
      */
     [[nodiscard]] float getAngle() const override { return abs_angle_; }
     /**
@@ -207,7 +207,7 @@ protected:
     // 钩子绕过公开 set* 状态门控；Core 提交状态前也必须建立安全输出。
     /// 发送使能请求并乐观返回 true；不检查发送受理或等待反馈。
     bool selfEnable() override;
-    /// 速度归零 / 位置保持 getAngle() 且沿用速度量程 / MIT 全零，直接调用 apply*。
+    /// 速度归零 / 位置保持 getAngle() 且沿用速度量程 / MIT 直接发送协议全零。
     void selfProtect() override;
     /// 发送协议失能并清除软件请求标记；不操作 Core 父子生命周期。
     void selfDisable() override;
@@ -217,6 +217,7 @@ protected:
      *
      * 当 DM 运行在 MIT 模式时，这个接口会把 MIT 退化为力矩输入使用。
      * 因此这里的入参语义应理解为力矩，单位 Nm。
+     * 位置、速度与增益直接使用协议零值，不应用软件位置坐标逆换算。
      */
     void applyCurrent(float current) override;
     /**
@@ -229,23 +230,20 @@ protected:
     /**
      * @brief 发送内部位置参考
      *
-     * 当前位置参考使用 deg；DM 协议内部会换算成 rad。
+     * 参考与 getAngle() 使用相同的软件零点和展开输出轴坐标（deg）；
+     * 恢复方向、减速比、软件零点与当前圈数后，换算成绝对协议位置（rad）。
      * maxv 单位 rpm，传 kNoLimit 时回退到 cfg_.vel_max_rad。
      */
     void applyInternalPosition(float pos, float maxv) override;
     /**
      * @brief 发送 MIT 控制指令
      *
-     * 当前实现约定：
-     * - `p_ref` 使用 deg
-     * - `v_ref` 使用 deg/s
-     * - `t_ff` 使用 Nm
+     * - `p_ref` 为与 getAngle() 同软件零点、同跨圈展开坐标的输出轴位置，单位 deg。
+     * - `v_ref` 为配套的输出轴速度参考，单位 deg/s，不是普通速度模式的 rpm。
+     * - `t_ff` 使用 Nm；力矩方向与 kp/kd 的协议单位保持不变。
      *
-     * 这里的 `v_ref` 不是普通速度模式下的目标转速，而是 MIT 五元组里的速度参考项，通常和 `p_ref`
-     * 配套使用，可理解为 `p_ref` 的导数。
-     *
-     * 也正因为如此，`setInternalMIT()` 的单位约定和普通 `setInternalVelocity()` 不同：前者当前用
-     * `deg + deg/s` 这一组量，再在驱动内部换算成协议要求的 `rad + rad/s`。
+     * 位置恢复软件零点、圈数、方向与减速比，速度恢复方向与减速比，
+     * 换算为协议 rad / rad/s 后才按配置量程限幅。
      */
     void applyInternalMIT(float t_ff, float p_ref, float v_ref, float kp, float kd) override;
 
@@ -253,7 +251,24 @@ private:
     void sendEnableFrame() const;
     void sendDisableFrame() const;
 
-    Config cfg_; ///< 构造时保存的配置
+    /**
+     * @brief 将与 getAngle() 同零点、同展开坐标的输出轴位置（deg）逆换算为协议 rad。
+     * @return 当前圈的绝对协议位置，不限幅
+     */
+    [[nodiscard]] float toProtocolPosition(float output_deg) const;
+
+    /**
+     * @brief 按原始协议坐标限幅、打包并发送 MIT，不再应用方向或软件位置逆换算。
+     * @param t_ff 已处理方向的协议力矩，单位 Nm
+     * @param p_ref 原始协议位置，单位 rad
+     * @param v_ref 原始协议速度，单位 rad/s
+     * @param kp 协议位置增益
+     * @param kd 协议速度增益
+     * @note 纯力矩与保护路径直接使用协议零位置、零速度、零增益。
+     */
+    void sendRawMIT(float t_ff, float p_ref, float v_ref, float kp, float kd);
+
+    Config cfg_; ///< 构造时保存的配置，外接减速比归一化为正值（非正值按 1）
 
     bool enable_requested_{ false }; ///< 使能协议请求标记，不是 Core 状态或反馈运行状态
 
