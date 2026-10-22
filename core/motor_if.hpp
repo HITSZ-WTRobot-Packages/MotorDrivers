@@ -269,8 +269,9 @@ namespace controllers
  * enable() 成功后根控制器处于 Protected，需要 standalone() 后才能通过 setRef() 接受参考；
  * Controlled 状态只接受 setRefFrom() 显式声明的当前父节点来源，不鉴别真实调用者身份。
  * Protected 状态下允许 update() 继续执行派生类已建立的安全参考。
- * 派生类 selfProtect() 应清理参考、PID 和分频状态并立即建立安全输出；selfDisable()
- * 只清理自身业务状态，不操作电机生命周期或控制关系。钩子不得重入生命周期 API。
+ * 派生类 selfProtect() 应建立保护参考并清理 PID 和分频状态：内部模式立即下发指令，
+ * 外部 PID 模式由后续 update() 计算并下发输出。selfDisable() 只清理自身业务状态，
+ * 不操作电机生命周期或控制关系。钩子不得重入生命周期 API。
  */
 class IController : public core::control::IController<1>
 {

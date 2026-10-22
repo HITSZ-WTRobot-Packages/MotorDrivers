@@ -26,12 +26,11 @@ void MotorPosController::selfProtect()
     internal_set_prescaler_ = 0;
 
     // 自身状态可能尚未提交；不要经 setRef() 的权限门建立保护参考。
+    // 仅内部模式立即发送保护指令；外部 PID 留给 update() 按周期计算输出。
     if (ctrl_mode_ == ControlMode::InternalPos || ctrl_mode_ == ControlMode::InternalVelPos)
         motor_->setInternalPosition(position_ref_, kNoLimit);
     else if (ctrl_mode_ == ControlMode::InternalVel)
         motor_->setInternalVelocity(0.0f, kNoLimit);
-    else
-        motor_->setCurrent(0.0f);
 }
 
 void MotorPosController::selfDisable()

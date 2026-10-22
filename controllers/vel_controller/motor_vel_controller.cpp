@@ -29,10 +29,9 @@ void MotorVelController::selfProtect()
     internal_set_prescaler_  = 0;
 
     // 自身状态可能尚未提交；不要经 setRef() 的权限门建立保护参考。
+    // 仅内部模式立即发送零速指令；外部 PID 留给 update() 按周期计算输出。
     if (ctrl_mode_ == ControlMode::InternalVel || ctrl_mode_ == ControlMode::InternalVelPos)
         motor_->setInternalVelocity(0.0f, kNoLimit);
-    else
-        motor_->setCurrent(0.0f);
 }
 
 void MotorVelController::selfDisable()
