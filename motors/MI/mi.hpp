@@ -21,8 +21,8 @@
  * - Type 17 / 18：参数读写
  *
  * 反馈通过向所在 Can 总线注册的成员回调分发：对象必须在对应 `Can::start()` 之前
- * 构造，并存活到该总线不再使用。控制指令由电机对象自行打包发送，控制权通过
- * tryAcquireController / releaseController 管理，获取控制权时自动使能电机。
+ * 构造，并存活到该总线不再使用。控制指令由电机对象自行打包发送，生命周期与父子
+ * 控制关系由 Core 管理；公开运动输入仅在 Standalone / Controlled 状态受理。
  */
 #pragma once
 
@@ -46,7 +46,11 @@ namespace motors
  * 当前库约定：
  * - 电机上电后默认处于 MIT 运控模式
  * - 角度对外统一使用 deg，速度使用 rpm，力矩使用 Nm
- * - MIT 接口的 v_ref 使用 deg/s（MIT 语义下的速度前馈，非普通转速指令）
+ * - MIT 位置沿用 getAngle() 的输出轴软件零点与展开坐标，速度前馈使用输出轴 deg/s
+ * - MIT 位置/速度逆转方向与外接减速后按协议量程限幅；力矩及 Kp/Kd 保留协议单位
+ * - Core 根使能成功进入 Protected；独立运动须显式 standalone()
+ * - 宿主串行化生命周期、业务与周期发包；Core 快照不保证业务并发安全
+ * - 析构前必须显式 disable()，不能依赖析构自动释放控制关系
  */
 class MIMotor final : public IMotor
 {
@@ -105,7 +109,7 @@ public:
     };
 
     explicit MIMotor(const Config& cfg);
-    /// 回调由总线借用本对象，必须存活到该总线不再使用；禁止复制/移动以免回调指向旧地址。
+    /// 析构前必须显式 disable；回调借用本对象，须存活到总线不再使用且不可复制/移动。
     ~MIMotor() override = default;
     MIMotor(const MIMotor&)            = delete;
     MIMotor& operator=(const MIMotor&) = delete;
@@ -127,44 +131,15 @@ public:
     }
 
     [[nodiscard]] bool supportsCurrent() const override { return true; }
-    /**
-     * @brief 低层力矩输入
-     *
-     * 在 MIT 模式下退化为纯力矩控制：发包时 Kp=Kd=0，仅写入力矩前馈。
-     * @param current 力矩，单位 Nm
-     */
-    void setCurrent(float current) override;
 
     [[nodiscard]] bool supportsInternalMIT() const override { return true; }
-    /**
-     * @brief 发送 MIT 控制指令（Type 1）
-     *
-     * 一次将位置、速度、力矩、刚度、阻尼打包下发。
-     *
-     * 注意这里的 v_ref 不是普通速度模式下的目标转速，而是 MIT 五元组里的速度前馈项，
-     * 通常与 p_ref 配套使用，可理解为位置参考的导数。因此单位采用 deg/s 而非 rpm。
-     *
-     * @param t_ff 前馈力矩，单位 Nm，范围 -12 ~ +12
-     * @param p_ref 位置参考，单位 deg
-     * @param v_ref 速度参考，单位 deg/s（MIT 语义下的速度前馈）
-     * @param kp 刚度，范围 0.0 ~ 500.0
-     * @param kd 阻尼，范围 0.0 ~ 5.0
-     */
-    void setInternalMIT(float t_ff, float p_ref, float v_ref, float kp, float kd) override;
-
-    // ---- 电机控制 ----
 
     /**
-     * @brief 发送使能报文（Type 3）
-     * @return 是否发送成功
+     * @brief 清除故障（Type 4，data[0] = 1），仅允许 Core Disabled 状态使用
+     * @return 请求是否被发送受理；启用状态直接返回 false，不改变 Core 生命周期
      */
-    bool enable();
-    /**
-     * @brief 发送失能报文（Type 4）
-     * @param clear_fault 是否同时清除故障
-     * @return 是否发送成功
-     */
-    bool disable(bool clear_fault = false);
+    bool clearFault();
+
     /**
      * @brief 设置当前角度为机械零位（Type 6，掉电丢失）
      * @return 是否发送成功
@@ -174,12 +149,12 @@ public:
     /**
      * @brief 心跳保活
      *
-     * 未使能时用失能包代替心跳，维持通信但不使能电机。
+     * Core Disabled 或尚未提交使能请求时直接发送 Type 4；不调用 Core 生命周期方法。
      */
     void ping()
     {
-        if (!enabled_)
-            disable();
+        if (!isEnabled() || !enable_requested_)
+            (void)sendEnableDisable(4, 0);
     }
 
     // ---- 参数读写 ----
@@ -195,7 +170,7 @@ public:
      * @brief 写入电机内部参数（Type 18，掉电丢失）
      * @param index 参数索引号
      * @param value 写入的 float 值
-     * @return 是否发送成功
+     * @return 是否发送受理；iq_ref / spd_ref / loc_ref 仅 Standalone / Controlled 可写
      */
     bool writeParam(uint16_t index, float value);
 
@@ -205,11 +180,6 @@ public:
     [[nodiscard]] float    torque() const { return feedback_.torque; }
     [[nodiscard]] RunState runState() const { return feedback_.run_state; }
     [[nodiscard]] uint16_t fault() const { return feedback_.fault; }
-
-    // ---- 控制权 ----
-
-    bool tryAcquireController(controllers::IController* ctrl) override;
-    void releaseController(controllers::IController* ctrl) override;
 
     // ---- CAN 滤波器 ----
 
@@ -239,7 +209,51 @@ public:
     static constexpr float kKpMax     = 500.0f; ///< Kp 量程
     static constexpr float kKdMax     = 5.0f;   ///< Kd 量程
 
+protected:
+    /// Type 3 发送受理才返回 true，不等待设备运行反馈。
+    bool selfEnable() override;
+    /// 绕过公开门控及软件坐标换算，发送协议全零 MIT 五元组；被拒收则 Error_Handler()。
+    void selfProtect() override;
+    /// 发送 Type 4 并清除使能请求标记；被拒收则 Error_Handler()。
+    void selfDisable() override;
+
+    /**
+     * @brief 低层力矩输入
+     *
+     * 在 MIT 模式下退化为纯力矩控制：协议位置/速度参考及 Kp/Kd 均为零。
+     * @param current 力矩，单位 Nm，仅应用方向符号，不按外接减速比缩放
+     */
+    void applyCurrent(float current) override;
+    /**
+     * @brief 发送 MIT 控制指令（Type 1）
+     *
+     * 位置与 getAngle() 共用输出轴软件零点和多圈展开坐标；发包时逆转方向、有效外接
+     * 减速比、零点及当前展开分支，再按协议量程限幅，不对越界目标另选跨圈分支。
+     *
+     * v_ref 是输出轴位置参考的速度前馈，使用 deg/s 而非 getVelocity() 的 rpm，
+     * 同样逆转方向与有效外接减速比。力矩仅应用方向符号，Kp/Kd 不做坐标缩放。
+     *
+     * @param t_ff 前馈力矩，单位 Nm，协议范围 -12 ~ +12
+     * @param p_ref 输出轴位置参考，单位 deg，与 getAngle() 同坐标
+     * @param v_ref 输出轴速度参考，单位 deg/s（MIT 语义下的速度前馈）
+     * @param kp 刚度，范围 0.0 ~ 500.0
+     * @param kd 阻尼，范围 0.0 ~ 5.0
+     */
+    void applyInternalMIT(float t_ff, float p_ref, float v_ref, float kp, float kd) override;
+
 private:
+    /**
+     * @brief 原始协议坐标 MIT 打包层，不应用软件零点、方向或外接减速比
+     * @param protocol_torque 协议力矩，单位 Nm
+     * @param protocol_position_deg 协议量程内位置，单位 deg（越界时限幅）
+     * @param protocol_velocity_deg_s 协议速度，单位 deg/s（转 rad/s 后限幅）
+     * @param kp 协议刚度，范围 0.0 ~ 500.0
+     * @param kd 协议阻尼，范围 0.0 ~ 5.0
+     * @return 发送受理结果，供安全钩子检查；普通业务保留原发送语义
+     */
+    bool sendMIT(float protocol_torque, float protocol_position_deg,
+                 float protocol_velocity_deg_s, float kp, float kd);
+
     /**
      * @brief 总线接收回调，仅在 ISR 上下文调用
      *
@@ -273,7 +287,7 @@ private:
 
     Config cfg_;
 
-    bool enabled_ = false; ///< 是否已发送使能报文
+    bool enable_requested_ = false; ///< 发送受理的使能请求标记，不是 Core 状态或 runState()
 
     volatile bool param_read_pending_ = false;
     volatile bool param_read_valid_   = false;

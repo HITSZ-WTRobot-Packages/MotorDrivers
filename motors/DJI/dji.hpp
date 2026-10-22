@@ -36,8 +36,9 @@ namespace motors
  * - 提供聚合发送所需的目标电流缓存
  *
  * 生命周期：`bsp::can::Can` 不支持注销回调，因此本对象必须在所在总线
- * `Can::start()` 之前构造，并存活到该总线不再使用为止；析构只释放发送槽位，
- * 不注销接收回调。本类不可复制、不可移动，因为回调借用本对象地址。
+ * `Can::start()` 之前构造，并存活到该总线不再使用为止；析构前必须显式 disable，
+ * 析构只释放发送槽位，不注销接收回调，也不自动停机或解除控制关系。
+ * 本类不可复制、不可移动，因为回调借用本对象地址。
  */
 class DJIMotor final : public IMotor
 {
@@ -79,7 +80,7 @@ public:
     };
 
     explicit DJIMotor(const Config& cfg);
-    /// 释放本对象在总线上的发送槽位；不注销接收回调（须在总线停止使用后调用）。
+    /// 须先显式 disable 并停止使用总线；析构仅释放发送槽位，不注销接收回调。
     ~DJIMotor() override;
 
     DJIMotor(const DJIMotor&)            = delete;
@@ -116,10 +117,6 @@ public:
 
     bool supportsCurrent() const override { return true; }
 
-    void setCurrent(const float current) override
-    {
-        iq_cmd_ = static_cast<int16_t>(cfg_.reverse ? -current : current);
-    }
     /**
      * @brief 取出缓存中的电流命令
      *
@@ -144,15 +141,27 @@ public:
      * @brief 把某组 DJI 电机当前缓存的电流值打包发送到总线
      *
      * 发送槽位由各电机在构造时按 `id1` 自动登记，调用方无需提供电机列表。本函数
-     * 只读取本组对应的 4 个槽位：缺席、或未受控（`currentController() == nullptr`）
-     * 的槽位写零；即使在 `can` 上没有任何 DJI 电机，也会发送一帧全零电流。非法分组
-     * 返回 `InvalidFrame`，不影响任何有效分组的发送行为。
+     * 只读取本组对应的 4 个槽位：Standalone/Controlled 电机发送缓存值，缺席、
+     * Protected/Disabled 的槽位写零；即使在 `can` 上没有任何 DJI 电机，也会发送
+     * 一帧全零电流。非法分组返回 `InvalidFrame`，不影响任何有效分组的发送行为。
      *
      * @param can       目标 CAN 总线（须已完成 `start()`）
      * @param cmd_group 分组
      * @return 帧的受理结果；本函数不重试也不等待真正发送完成
      */
     static bsp::can::SendResult SendIqCommand(bsp::can::Can& can, IqSetCMDGroup cmd_group);
+
+protected:
+    /// 仅由 IMotor 的状态门控包装调用；电流仍为协议指令值，不是安培。
+    void applyCurrent(const float current) override
+    {
+        iq_cmd_ = static_cast<int16_t>(cfg_.reverse ? -current : current);
+    }
+
+    /// 仅清本电机缓存，不发帧；由用户层调用 SendIqCommand 统一发送。
+    void selfProtect() override;
+    /// 同保护一样只清缓存，不发帧，也不自动解除控制关系。
+    void selfDisable() override;
 
 private:
     /**
