@@ -1,0 +1,4 @@
+name = "MITController"
+pkgname = "MotorController::MITController"
+version = "0.1.0"
+dependencies = ["MotorDrivers::Core", "libs::MIT_PD"]
