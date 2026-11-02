@@ -34,9 +34,6 @@ uint32_t operator|(const uint32_t& b, const DMMotor::Mode& a)
     return static_cast<uint32_t>(a) | b;
 }
 
-// 按当前库设计，DM 的 master_id 是全局统一值，由 CAN_FilterInit 写入，接收回调据此判定。
-static uint32_t master_id_;
-
 // 对于 S3519，傻逼达妙会返回减速前的位置；对于其他电机，返回减速后的
 static constexpr float get_inv_pos_reduction_rate(const DMMotor::Type type)
 {
@@ -64,8 +61,9 @@ DMMotor::DMMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f : 1.
     if (cfg_.can_fd_brs && !bsp::can::Can::SupportsFD)
         Error_Handler();
 
-    // id 仅低四位有效
-    cfg_.id0 &= 0x0F;
+    if (cfg_.id0 < 0x9 || cfg_.id0 > 0xF)
+        // 请将 DM ID 设置为 0x9 ~ 0xF, 对应的 master_id 为 0x029 ~ 0x02F
+        Error_Handler();
 
     inv_reduction_rate_ = 1.0f / // 取倒数将除法转为乘法加快运算速度
                           (cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f); // 外接减速比
@@ -87,7 +85,7 @@ void DMMotor::on_can(const bsp::can::FrameView& frame) noexcept
     if (header.id_type != bsp::can::IdType::Standard || header.type != bsp::can::FrameType::Data)
         return;
 
-    if (header.id != master_id_ || frame.data.size() != 8)
+    if (header.id != masterId() || frame.data.size() != 8)
         return;
 
     // data[0] 高 4 位是状态 ERR，低 4 位是电机 ID；只消费属于自己的反馈。
@@ -231,22 +229,17 @@ void DMMotor::setInternalMIT(const float t_ff, float p_ref, float v_ref, float k
     (void)cfg_.can.send({ tx_header(), std::span<const uint8_t>{ data, sizeof(data) } });
 }
 
-bsp::can::Status DMMotor::CAN_FilterInit(bsp::can::Can& can,
-                                         const uint32_t filter_index,
-                                         const uint32_t master_id)
+bsp::can::Status DMMotor::CAN_FilterInit(bsp::can::Can& can, const uint32_t filter_index)
 {
-    // 全局统一的主机 ID：接收回调据此判断反馈帧是否属于本机。
-    master_id_ = master_id;
-
-    // 仅接收发给主机（master）的标准帧：id1 精确等于 master_id，掩码 0x7FF。
+    // 覆盖合法电机反馈 ID 0x029 ~ 0x02F；额外放行的 0x028 由实例回调排除。
     // can_driver2 的 index 语义随后端而定：bxCAN 为 filter bank 编号，FDCAN 为所选
     // 标准 ID 过滤器数组内的 element 下标，两者不可互换。命中帧写入 FIFO0（沿用原约定）。
     const bsp::can::IdFilter filter{ .index   = filter_index,
                                      .id_type = bsp::can::IdType::Standard,
                                      .mode    = bsp::can::FilterMode::Mask,
                                      .action  = bsp::can::FilterAction::Fifo0,
-                                     .id1     = master_id,
-                                     .id2     = 0x7FFU };
+                                     .id1     = 0x028U,
+                                     .id2     = 0x7F8U };
     return can.configure_filter(filter);
 }
 

@@ -24,8 +24,8 @@ namespace motors
  * 否则反馈换算和指令打包都会出错。
  *
  * 当前库对 DM 还额外有两个明确约束：
- * - 所有 DM 电机共享同一个 `master_id`
- * - `id0` 建议使用 `0x09 ~ 0x0F`，以便避开 DJI 的标准 ID 区间
+ * - 每台电机的 `master_id` 必须在电调端设为 `0x020 + id0`，驱动不会自动配置
+ * - `id0` 必须使用 `0x09 ~ 0x0F`，以便避开 DJI 的标准 ID 区间
  *
  * 反馈通过 `bsp::can::Can` 的成员回调接收：构造时即向 `cfg.can` 注册
  * `on_can`，因此本对象必须在 `Can::start()` 之前构造，并存活到该总线不再使用
@@ -34,6 +34,7 @@ namespace motors
 class DMMotor : public IMotor
 {
 public:
+    static constexpr uint32_t MasterIDOffset = 0x020;
     /**
      * @brief 已封装的 DM 电机类型
      */
@@ -85,7 +86,7 @@ public:
     struct Config
     {
         bsp::can::Can& can;         ///< 所在 CAN 总线（借用，须比本对象长寿）
-        uint8_t        id0;         ///< 电调 ID，仅低 4 位有效，建议从 0x09 到 0x0F
+        uint8_t        id0;         ///< 电调 ID，必须为 0x09 到 0x0F，不截取低 4 位
         Type           type;        ///< 电机类型
         Mode           mode;        ///< 驱动器控制模式，需要和上位机配置一致
         float          pos_max_rad; ///< 驱动器配置的位置最大值，单位 rad
@@ -206,20 +207,17 @@ public:
     /**
      * @brief 初始化 DM 反馈的 CAN 滤波器
      *
-     * 只接受发给主机（master）的标准帧：`id1 = master_id`、掩码 `0x7FF`；命中帧写入
-     * FIFO0。RTR 位不参与掩码，因此硬件同时放行数据帧与远程帧，远程帧由 `on_can`
-     * 丢弃（原实现靠掩码低半字一并排除）。
+     * 配置标准 ID 掩码 `id1 = 0x028`、`id2 = 0x7F8`，放行 `0x028 ~ 0x02F` 至
+     * FIFO0，覆盖所有合法电机的 `masterId()`。回调再匹配自身主机 ID 与电机 ID。
+     * RTR 位不参与掩码，硬件也放行远程帧，由 `on_can` 丢弃。
      *
      * @param can 目标总线（须在 `Can::start()` 之前调用）
      * @param filter_index 过滤器资源编号。can_driver2 中 bxCAN 为 filter bank 编号，
      *                     FDCAN 为所选标准/扩展过滤器数组内的 element 下标，两者硬件
      *                     布局不同，索引不可互换。
-     * @param master_id 本机主控 ID，用于接收属于自己的反馈；当前库要求所有 DM 电机共用同一个值
      * @return can_driver2 状态码；调用方需自行检查
      */
-    [[nodiscard]] static bsp::can::Status CAN_FilterInit(bsp::can::Can& can,
-                                                         uint32_t       filter_index,
-                                                         uint32_t       master_id);
+    [[nodiscard]] static bsp::can::Status CAN_FilterInit(bsp::can::Can& can, uint32_t filter_index);
 
     /**
      * @brief 获取控制权时，同时尝试使能电机
@@ -258,6 +256,8 @@ public:
      * @brief 最近一次反馈出来的状态码
      */
     [[nodiscard]] State state() const { return feedback_.state; }
+
+    [[nodiscard]] uint32_t masterId() const { return MasterIDOffset + cfg_.id0; }
 
 private:
     Config cfg_; ///< 构造时保存的配置

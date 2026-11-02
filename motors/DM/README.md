@@ -63,18 +63,25 @@ motors::DMMotor::Config cfg{
 
 ## 协议约束
 
-### 1. `master_id` 必须全局一致
+### 1. 每台电机的 `master_id` 为 `0x020 + id0`
 
-当前驱动设计明确要求：所有 `DM` 电机共享同一个 `master_id`。
+宿主须通过电调上位机将每台电机的 CAN ID 配为 `id0`，主机 ID（`master_id`）配为 `0x020 + id0`。
+例如 `id0 = 0x09` 对应 `master_id = 0x029`，`id0 = 0x0A` 对应 `master_id = 0x02A`；驱动不会自动修改电调配置。
+同一总线上的 `id0` 必须唯一；不同总线可以复用相同的 `id0` 和对应的 `master_id`，没有全局共享主机 ID。
 
-`CAN_FilterInit(can, index, master_id)` 使用这一全局值配置过滤器及反馈匹配。
-每个电机通过 `Can::register_callback` 注册成员回调，先匹配标准帧的 `master_id`，再匹配
-`data[0]` 低 4 位的 `id0`；不再维护电机对象映射表。不同总线配置过滤器时也必须使用相同的 `master_id`。
+每个电机通过 `Can::register_callback` 注册成员回调，先匹配标准数据帧的 ID 是否等于自身的
+`masterId()`（`0x020 + id0`），再匹配 `data[0]` 低 4 位的 `id0`；反馈负载须为 8 字节。
 电机须在总线启动前构造，并保持存活到总线不再使用；详见 [CAN 接入说明](../../README.md#can-接入方式)。
 
-宿主负责分配过滤器资源。现有 `CAN_FilterInit` 会写入全局主机 ID，并实际配置精确匹配该标准 ID、进入 FIFO0 的硬件过滤器；不是只校验。必须在总线启动前完成并检查返回的 `bsp::can::Status`。索引是 bxCAN bank 或 FDCAN 标准过滤器 element，不可互换；不能因调用失败而假定全局主机 ID 未改变。配置校验与 CubeMX 边界的维护要求见根文档。
+`CAN_FilterInit(can, index)` 不再接收 `master_id` 参数，也不写入全局主机 ID。
+它实际配置标准 ID 掩码过滤器 `id1 = 0x028`、`id2 = 0x7F8`，将 `0x028 ~ 0x02F` 送入 FIFO0，
+覆盖所有合法电机的反馈 ID `0x029 ~ 0x02F`；额外放行的 `0x028` 不会被任何合法 DM 实例消费。
+硬件过滤器不比较 RTR，远程帧由接收回调丢弃。每条使用 DM 的总线各自配置一次即可，无须按电机重复配置。
 
-### 2. `id0` 建议使用 `0x09 ~ 0x0F`
+宿主负责分配过滤器资源。必须在总线启动前调用并检查返回的 `bsp::can::Status`；这会实际配置硬件过滤器，不是只校验。
+索引是 bxCAN bank 或 FDCAN 标准过滤器 element，不可互换。配置校验与 CubeMX 边界的维护要求见根文档。
+
+### 2. `id0` 必须使用 `0x09 ~ 0x0F`
 
 `DM` 返回状态时：
 
@@ -87,7 +94,7 @@ motors::DMMotor::Config cfg{
 - 位置模式：`0x100 + ID`
 - MIT 模式：`0x000 + ID`
 
-因此当前库建议把 `id0` 放在 `0x09 ~ 0x0F`，尽量避开 DJI 常见反馈 ID `0x201 ~ 0x208`。
+当前库将 `id0` 限定为 `0x09 ~ 0x0F`，以避开 DJI 常见反馈 ID `0x201 ~ 0x208`；不再截取低 4 位，超出范围会在构造时触发 `Error_Handler()`。
 
 ## `ping()` 为什么复用使能 / 失能包
 
