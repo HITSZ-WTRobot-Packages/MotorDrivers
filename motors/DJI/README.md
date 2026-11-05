@@ -31,6 +31,26 @@
 
 `setCurrent()` 缓存的是协议电流指令，不是统一以安培解释的物理电流。PID 与限幅应按电调协议范围设置；驱动不在此接口中替宿主实现安全限幅。
 
+## 生命周期与停机边界
+
+`DJIMotor` 继承 Core `IController<0>` 的生命周期，初始为 `Disabled`，`enable()` 成功后为
+`Protected`，并已清零本电机缓存，但不发送 CAN 帧。只有 `Standalone` 或
+`Controlled` 状态下，公开 `setCurrent()` 才更新缓存；`Protected` / `Disabled` 下的
+调用不生效。公开命令不鉴别来自绑定控制器还是直接调用，宿主必须避免相互覆盖。
+
+`protect()` 与 `disable()` 的钩子只清除本电机缓存，不额外发送帧，也不修改同组其他电机的
+缓存。电流帧统一由用户层周期调用 `SendIqCommand()` 发送：组包时 `Protected` / `Disabled`
+槽位强制写零，其他 `Standalone` / `Controlled` 槽位仍使用各自缓存。
+
+使能、保护和失能都不会触发 DJI 发帧，也不启动总线或注册回调。用户负责在实际发送前成功
+`Can::start()`，并在保护/失能后继续发送电流组指令，将零输出送到电调；仅改变逻辑状态或清
+缓存不代表物理停机。`SendIqCommand()` 返回发送受理结果，由用户处理；零电流也不等于
+机械制动或硬件急停。
+
+Core 的状态/控制关系快照不保证业务并发安全；生命周期操作、业务命令与周期分组发送必须
+由宿主串行化。销毁前必须显式 `disable()` 并停止总线使用；析构不自动停机或解除关系，
+仍只释放发送槽位，不注销回调。
+
 ## 聚合发送
 
 `DJI` 和 `DM` / `VESC` 的一个重要区别是：`setCurrent()` 不会马上发出一帧 CAN 报文。
@@ -46,16 +66,36 @@ DJI 协议一次报文携带 4 台电机的电流命令，因此分为两组：
 - `IqCMDGroup_1_4`：`id1 = 1 ~ 4`，发送 ID `0x200`。
 - `IqCMDGroup_5_8`：`id1 = 5 ~ 8`，发送 ID `0x1FF`。
 
-可在每个控制周期发送两组，这样修改电机的构造配置 `id1` 时，不需要修改发送任务：
+例如，对已构造、完成过滤器配置且总线启动成功的 `motor`，先检查生命周期结果，再写入协议
+电流值；以下演示一个周期，实际宿主可在每个控制周期发送两组，这样修改 `id1` 时无需修改发送任务：
 
 ```cpp
+if (!motor.enable() || !motor.standalone())
+    Error_Handler(); // enable 仅进入 Protected；standalone 成功后才接受目标
+motor.setCurrent(1000.0f); // 协议指令值，不是 A
+
 const auto result_1_4 = motors::DJIMotor::SendIqCommand(
         can, motors::DJIMotor::IqSetCMDGroup::IqCMDGroup_1_4);
 const auto result_5_8 = motors::DJIMotor::SendIqCommand(
         can, motors::DJIMotor::IqSetCMDGroup::IqCMDGroup_5_8);
 ```
 
-缺少电机或未受控的槽位发送零电流；总线上没有 DJI 电机时也发送对应组的全零命令。
+需要停机时，宿主串行执行生命周期，并在用户发送周期中继续提交电流组指令：
+
+```cpp
+if (!motor.protect())
+    Error_Handler(); // 仅清本机缓存，不发帧
+if (!motor.disable())
+    Error_Handler(); // 销毁前须显式失能；析构不代替这个步骤
+
+const auto stop_result_1_4 = motors::DJIMotor::SendIqCommand(
+        can, motors::DJIMotor::IqSetCMDGroup::IqCMDGroup_1_4);
+const auto stop_result_5_8 = motors::DJIMotor::SendIqCommand(
+        can, motors::DJIMotor::IqSetCMDGroup::IqCMDGroup_5_8);
+```
+
+缺少电机或处于 `Protected` / `Disabled` 的槽位发送零电流；`Standalone` / `Controlled`
+槽位发送缓存值，无须以存在父控制器为前提。总线上没有 DJI 电机时也发送对应组的全零命令。
 同一总线上的重复 `id1` 会在构造时触发 `Error_Handler()`，不同总线可以使用相同 `id1`。
 发送登记最多支持 `CAN_DRIVER_MAX_INSTANCES` 条总线；注册接收回调失败不会提交发送槽位。
 返回值为 `bsp::can::SendResult`，受理或排队不代表已经在线上发送成功。

@@ -31,7 +31,7 @@
 
 ## 配置与物理量
 
-电机 `id` 按当前实现的 `0 ~ 127` 范围使用，须等于设备实际 ID；主机 ID 默认常用 `0`。`reduction_rate` 是外部减速比，用于将反馈角度和速度换算到输出轴。`reverse` 同时处理反馈与控制方向，宿主不要重复反转。
+电机 `id` 按当前实现的 `0 ~ 127` 范围使用，须等于设备实际 ID；主机 ID 默认常用 `0`。`reduction_rate` 是外部减速比，反馈换算到输出轴，MIT 位置和速度参考再逆换算回电机侧。`reverse` 同时处理反馈与控制方向，宿主不要重复反转。
 
 | 物理量 / 输入 | 单位与限制 |
 | --- | --- |
@@ -40,11 +40,11 @@
 | 反馈力矩 / 低层力矩输入 | `Nm` |
 | 温度 | `degC` |
 | MIT 前馈力矩 | `Nm`，协议量程 `-12 ~ +12` |
-| MIT 位置参考 | `deg` |
-| MIT 速度参考 | `deg/s`，不是普通速度接口的 `rpm` |
+| MIT 位置参考 | 输出轴 `deg`，与 `getAngle()` 使用相同的软件零点和展开坐标 |
+| MIT 速度参考 | 输出轴 `deg/s`，不是普通速度接口的 `rpm` |
 | MIT 刚度 / 阻尼 | 刚度 `0 ~ 500`，阻尼 `0 ~ 5` |
 
-MIT 速度项与位置参考配套，常可理解为位置参考的导数。驱动按协议范围限幅并编码，不代替宿主机构限位、安全限幅或急停。
+MIT 速度项与位置参考配套，常可理解为位置参考的导数。发送业务目标前，驱动恢复方向、外接减速比、软件零点及当前圈数，再按协议范围限幅并编码；以当前 `getAngle()` 为位置参考会恢复当前原始反馈位置，而不是前往协议零位。力矩与 `Kp/Kd` 仍保持协议口径，不随减速比缩放。纯力矩输入和生命周期保护直接构造协议零位置、零速度及零增益，不经过业务零点逆换算。协议限幅不代替宿主机构限位、安全限幅或急停。
 
 ## 反馈与零点
 
@@ -54,25 +54,31 @@ Type 2 更新角度、速度、力矩、温度、运行状态、故障位及连�
 
 `resetAngle()` 仅重定义软件零点；`setMechanicalZero()` 会改变电机内部机械零位且掉电丢失。一般控制优先使用软件归零；写机械零位前须确认机构位置和安全状态。
 
-## 使能、失能与保活
+## Core 生命周期、保护与保活
 
-`disable(true)` 请求停转并清故障，`disable(false)` 只请求失能。`ping()` 在未使能状态发送失能包以保活，不会重新使能电机。成功解析反馈后喂 Watchdog，`isConnected()` 只读其状态。
+`MIMotor` 继承 `core::control::IController<0>`，父子关系由 Core 管理，不再提供旧控制权申请 / 释放接口。无控制者根 `enable()` 成功后进入 `Protected`；直接控制需再调用 `standalone()`，父控制器接管则由 Core 建立 `Controlled`。公开 `setCurrent()` / `setInternalMIT()` 继承状态门控包装，仅在 `Standalone` / `Controlled` 受理，不区分直接调用与父控制器调用。
 
-申请控制权时，如果本地状态尚未使能，会在控制权仲裁前尝试发送使能命令；即使之后申请失败，也不能假定没有硬件副作用。释放控制权不会自动失能，设备安全状态由宿主协调。
+`selfEnable()` 发送 Type 3，按底层发送受理结果返回 `bool`；使能请求标记不等于 Core `state()`，也不等于反馈 `runState()`。`selfProtect()` 直接发送 MIT 全零五元组（力矩与 `Kp = Kd = 0`），`selfDisable()` 直接发送 Type 4 并清除请求标记；钩子不经过公共运动门控，不启动总线、不注册回调、不自行操作父子生命周期。保护 / 失能帧被拒收时调用既有 `Error_Handler()`，不重试、不等待硬件确认。
 
-返回 `bool` 的发送接口确认的是发送受理，不是电机执行完成；受理包括排队及替换旧排队帧。五元组和低层输入接口不会把发送失败返回给调用者，不能用“调用完成”作为线上成功确认。
+旧 `disable(clear_fault)` 已移除：现在 `disable(bool reverse = false)` 是 Core 生命周期接口，参数不再表示清故障。清故障请在 Core `Disabled` 时调用明确的 `clearFault()`（Type 4，data[0] = 1）；启用状态调用直接返回 `false`，不会更改 Core 状态。
+
+`ping()` 在 Core `Disabled` 或本地未提交使能请求时直接发送 Type 4 保活，不调用 Core `disable()` / `enable()`，不会使能电机。成功解析反馈后喂 Watchdog，`isConnected()` 只读其状态。
+
+返回 `bool` 的协议发送接口确认的是发送受理，不是电机执行完成；受理包括排队及替换旧排队帧。五元组和低层输入接口保留原有不返回发送失败的业务语义，不能用“调用完成”作为线上成功确认。
+
+宿主必须串行化生命周期、业务调用和周期发包；Core 快照不保证业务并发安全，也不鉴别调用者来源。析构前必须显式 `disable()` 并处理返回值，不能依赖析构释放；回调寿命约束仍然有效。
 
 ## 参数读写与模式
 
 Type 17 / 18 提供参数读写。`run_mode` 索引为 `0x7005`，可写入 `Mode::MIT` 并通过参数读取核对；模式还包括 `Pos`、`Vel`、`Cur`，但统一控制接口目前仅完整接入 MIT。通过参数切换其他模式不会让内部速度、位置接口自动可用。
 
-参数写入和机械零位均不构成掉电保存承诺。`writeParam()` 成功表示发送已受理，不是读回一致；宿主应核对需要确认的状态。
+参数写入和机械零位均不构成掉电保存承诺。`writeParam()` 成功表示发送已受理，不是读回一致；宿主应核对需要确认的状态。目标参数 `iq_ref`（`0x7006`）、`spd_ref`（`0x700A`）、`loc_ref`（`0x7016`）同样仅在 `Standalone` / `Controlled` 可写，其他状态返回 `false`，不能用参数写入绕过运动门控；维护参数与读取不新增状态限制。参数访问保持电调原始协议单位和坐标，不应用 MIT 业务入口的软件零点、方向或减速比转换。
 
 `readParam()` 同步等待最多 `10 ms`，依赖 HAL tick 推进和 Type 17 回包通过同一接收分发路径到达。不要在 ISR 中调用，也不要在高频控制循环内连续阻塞读取。参数访问应由宿主串行协调。
 
 ## 借用总线的最小示例
 
-以下只展示构造与周期 MIT 调用，不配置外设、过滤器或启动总线。宿主须在启动前调用构造入口，在启动及安全条件满足后选择设备模式并使能，再运行周期控制；示意 ID 不是板卡或总线实例配置。
+以下展示构造、独立控制会话与周期 MIT 调用，不配置外设、过滤器或启动总线。宿主须在启动前构造对象，在启动及安全条件满足后选择 MIT 模式并开启会话；示意 ID 不是板卡或总线实例配置。
 
 ```cpp
 #include "mi.hpp"
@@ -84,12 +90,26 @@ motors::MIMotor& attach_motor(bsp::can::Can& can)
     return motor;
 }
 
+bool begin_control(motors::MIMotor& motor)
+{
+    // enable 成功仅建立 Protected；显式 standalone 后才接受公开目标。
+    if (!motor.enable())
+        return false;
+    return motor.standalone();
+}
+
 void control_step(motors::MIMotor& motor, float target_deg, float target_dps,
                   float torque_ff, float kp, float kd)
 {
-    // 宿主还须满足机构安全条件；在线本身不代表无故障或已使能。
+    // 宿主须先成功 begin_control，且串行化此处与生命周期操作。
     if (motor.isConnected())
         motor.setInternalMIT(torque_ff, target_deg, target_dps, kp, kd);
+}
+
+bool end_control(motors::MIMotor& motor)
+{
+    // 析构前必须完成；失败时宿主须按生命周期事务结果处理。
+    return motor.disable();
 }
 ```
 

@@ -30,7 +30,8 @@ namespace motors
  *
  * 生命周期：对象在构造时把成员回调注册到 `bsp::can::Can`，因此必须在对应总线的
  * `Can::start()` 之前构造，并保证对象比总线的使用期更长——本类不提供注销回调的
- * 接口。为避免借用中的回调指向已失效地址，本类既不可复制也不可移动。
+ * 接口。析构前必须显式 disable；析构不自动停机或解除控制关系。
+ * 为避免借用中的回调指向已失效地址，本类既不可复制也不可移动。
  */
 class VESCMotor : public IMotor
 {
@@ -138,7 +139,7 @@ public:
     };
 
     explicit VESCMotor(const Config& cfg);
-    /// 析构不注销回调：总线的回调表在 start() 后固定，对象须活到总线不再使用。
+    /// 须先显式 disable；析构不注销回调，对象须活到总线不再使用。
     ~VESCMotor() override = default;
 
     VESCMotor(const VESCMotor&)            = delete;
@@ -166,18 +167,11 @@ public:
     [[nodiscard]] bool isConnected() const override { return watchdog_.isFed(); }
 
     [[nodiscard]] bool supportsCurrent() const override { return true; }
-    void               setCurrent(float current) override;
 
     [[nodiscard]] InternalVelocitySupportLevel internalVelocitySupportLevel() const override
     {
         return InternalVelocitySupportLevel::RefOnly;
     }
-    /**
-     * @brief 发送内部速度参考
-     *
-     * VESC 内部速度模式不支持 maxi，该参数被忽略。
-     */
-    void setInternalVelocity(float rpm, float maxi) override;
 
     /**
      * @brief 是否支持内部位置控制
@@ -200,6 +194,16 @@ public:
      * 版本“32 位掩码、仅比较 IDE 位、FIFO0”的接受语义一致。
      */
     [[nodiscard]] static bsp::can::Status CAN_FilterInit(bsp::can::Can& can, uint32_t filter_index);
+
+protected:
+    /// IMotor 状态门控后发送电流，单位 A；普通业务发送不重试。
+    void applyCurrent(float current) override;
+    /// 发送输出轴速度参考，单位 rpm；VESC 不支持 maxi，该参数被忽略。
+    void applyInternalVelocity(float rpm, float maxi) override;
+    /// 绕过公开命令门控直接提交零电流；受理失败调用 Error_Handler。
+    void selfProtect() override;
+    /// 同保护提交零电流，不等待硬件反馈、不自动解除控制关系。
+    void selfDisable() override;
 
 private:
     // 参数范围限制，对应 VESC_SET_*_MAX。
@@ -277,10 +281,11 @@ private:
      */
     static float clamp(float value, float abs_max);
     /**
-     * @brief 发送设置指令
+     * @brief 内部协议发送 helper，不向应用开放以免绕过 IMotor 状态门控
      * @param cmd 指令
-     * @param value 值
+     * @param value 值，保留对应命令的原单位与缩放
+     * @return CAN 受理结果；不重试、不等待硬件反馈
      */
-    void sendSetCommand(SetCommand cmd, float value) const;
+    bsp::can::SendResult sendSetCommand(SetCommand cmd, float value) const;
 };
 } // namespace motors

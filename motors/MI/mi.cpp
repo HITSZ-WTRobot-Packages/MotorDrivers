@@ -142,8 +142,8 @@ static uint16_t kd_to_raw(float kd)
 
 MIMotor::MIMotor(const Config& cfg) : cfg_(cfg), sign_(cfg_.reverse ? -1.0f : 1.0f)
 {
-    const float reduction_rate = cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f;
-    inv_reduction_rate_        = 1.0f / reduction_rate;
+    cfg_.reduction_rate = cfg_.reduction_rate > 0 ? cfg_.reduction_rate : 1.0f;
+    inv_reduction_rate_ = 1.0f / cfg_.reduction_rate;
 
     if (cfg_.can.register_callback<&MIMotor::on_can>(*this) != bsp::can::Status::Ok)
         Error_Handler();
@@ -191,24 +191,39 @@ bool MIMotor::sendEnableDisable(const uint8_t comm_type, const uint8_t data0)
     return send_frame(comm_type, cfg_.master_id, data);
 }
 
-bool MIMotor::enable()
+bool MIMotor::selfEnable()
 {
     if (sendEnableDisable(3, 0))
     {
-        enabled_ = true;
+        enable_requested_ = true;
         return true;
     }
     return false;
 }
 
-bool MIMotor::disable(const bool clear_fault)
+void MIMotor::selfDisable()
 {
-    if (sendEnableDisable(4, clear_fault ? 1U : 0U))
-    {
-        enabled_ = false;
-        return true;
-    }
-    return false;
+    // 没有失败返回通道：发送拒绝必须遵守现有致命失败约定。
+    if (!sendEnableDisable(4, 0))
+        Error_Handler();
+    enable_requested_ = false;
+}
+
+void MIMotor::selfProtect()
+{
+    // 此时 Core 状态可能仍为 Disabled；绕过公开门控和软件坐标换算，发送协议零参考。
+    if (!sendMIT(0.0f, 0.0f, 0.0f, 0.0f, 0.0f))
+        Error_Handler();
+}
+
+bool MIMotor::clearFault()
+{
+    if (isEnabled())
+        return false;
+    const bool accepted = sendEnableDisable(4, 1);
+    if (accepted)
+        enable_requested_ = false;
+    return accepted;
 }
 
 bool MIMotor::setMechanicalZero()
@@ -218,18 +233,15 @@ bool MIMotor::setMechanicalZero()
 
 // ---- MIT 控制指令（Type 1） ----
 
-void MIMotor::setInternalMIT(const float t_ff, float p_ref, float v_ref, float kp, float kd)
+bool MIMotor::sendMIT(const float protocol_torque, const float protocol_position_deg,
+                      const float protocol_velocity_deg_s, const float kp, const float kd)
 {
-    // 外部接口约定：t_ff 用 Nm，p_ref 用 deg，v_ref 用 deg/s，kp/kd 为标量。
-    // 下发前先限幅，再应用方向符号，最后按协议量程换算为 uint16。
-    p_ref = std::clamp(p_ref, -kPosHalfDeg, kPosHalfDeg);
-    v_ref = std::clamp(DEG2RAD(v_ref), -MIMotor::kVelMaxRps, MIMotor::kVelMaxRps);
-
-    const uint16_t pos_u16 = pos_deg_to_raw(sign_ * p_ref);
-    const uint16_t vel_u16 = vel_rps_to_raw(sign_ * v_ref);
+    // 原始协议坐标打包层：不应用软件零点、方向或外接减速比；转换后按协议量程限幅。
+    const uint16_t pos_u16 = pos_deg_to_raw(protocol_position_deg);
+    const uint16_t vel_u16 = vel_rps_to_raw(DEG2RAD(protocol_velocity_deg_s));
     const uint16_t kp_u16  = kp_to_raw(kp);
     const uint16_t kd_u16  = kd_to_raw(kd);
-    const uint16_t tor_u16 = tor_nm_to_raw(sign_ * t_ff);
+    const uint16_t tor_u16 = tor_nm_to_raw(protocol_torque);
 
     uint8_t data[8];
     write_u16_be(&data[0], pos_u16);
@@ -238,15 +250,25 @@ void MIMotor::setInternalMIT(const float t_ff, float p_ref, float v_ref, float k
     write_u16_be(&data[6], kd_u16);
 
     // data2（bit23~8 of ExtId）承载力矩值
-    (void)send_frame(1, tor_u16, data);
+    return send_frame(1, tor_u16, data);
+}
+
+void MIMotor::applyInternalMIT(const float t_ff, const float p_ref, const float v_ref,
+                               const float kp, const float kd)
+{
+    // 逆转反馈的输出轴方向、有效减速比、软件零点和当前位置所在的展开分支。
+    const float protocol_position_deg = sign_ * p_ref * cfg_.reduction_rate + angle_zero_ -
+                                        static_cast<float>(feedback_.round_cnt) * kPosHalfDeg * 2.0f;
+    const float protocol_velocity_deg_s = sign_ * v_ref * cfg_.reduction_rate;
+    (void)sendMIT(sign_ * t_ff, protocol_position_deg, protocol_velocity_deg_s, kp, kd);
 }
 
 // ---- 电流 / 力矩输入 ----
 
-void MIMotor::setCurrent(const float current)
+void MIMotor::applyCurrent(const float current)
 {
-    // 纯力矩控制：Kp=Kd=0，仅写入力矩前馈
-    setInternalMIT(current, 0, 0, 0, 0);
+    // 纯力矩控制保留协议位置/速度零参考，不经过业务软件坐标换算。
+    (void)sendMIT(sign_ * current, 0, 0, 0, 0);
 }
 
 // ---- 参数读写 ----
@@ -289,6 +311,11 @@ bool MIMotor::readParam(const uint16_t index, float& value)
 
 bool MIMotor::writeParam(const uint16_t index, const float value)
 {
+    // 参数目标也是运动命令，不能绕过公开 set* 的同一状态边界。
+    if ((index == 0x7006 || index == 0x700A || index == 0x7016) &&
+        !isStandalone() && !isControlled())
+        return false;
+
     uint8_t data[8] = { static_cast<uint8_t>(index & 0xFF),
                         static_cast<uint8_t>((index >> 8) & 0xFF),
                         0,
@@ -307,22 +334,6 @@ bool MIMotor::writeParam(const uint16_t index, const float value)
     }
 
     return send_frame(18, cfg_.master_id, data);
-}
-
-// ---- 控制权 ----
-
-bool MIMotor::tryAcquireController(controllers::IController* ctrl)
-{
-    // 获取控制权时同时使能电机
-    if (!enabled_)
-        enable();
-    return IMotor::tryAcquireController(ctrl);
-}
-
-void MIMotor::releaseController(controllers::IController* ctrl)
-{
-    // 交接控制权时不失能电机，保持运行状态
-    IMotor::releaseController(ctrl);
 }
 
 // ---- 反馈解码（Type 2） ----

@@ -37,6 +37,36 @@
 
 电流接口按安培理解，速度接口按输出轴 `rpm`。默认控制模式仍是 `ExternalPID`，若希望驱动器内部速度闭环，应显式选择内部速度路径并确认电调配置。直接下发电流与速度是替代的控制动作，不应一边由控制器更新、一边另行直接写入。
 
+## 生命周期与停机边界
+
+`VESCMotor` 继承 Core `IController<0>`，初始为 `Disabled`；`enable()` 成功后进入
+`Protected` 并提交零电流命令。独立操作必须随后成功调用 `standalone()`；由控制器接管时，
+控制关系由 Core 管理。公开 `setCurrent()` / `setInternalVelocity()` 仅在 `Standalone` /
+`Controlled` 接受写入，不鉴别调用者来自控制器还是直接调用；宿主负责避免业务互相覆盖。
+原始设置帧发送 helper 仅供驱动内部使用，不能从公开 API 绕过状态门控。
+
+示例中 `can` 与 `motor` 已按上述顺序构造、配置过滤器并成功启动总线；所有调用均由宿主串行执行：
+
+```cpp
+if (!motor.enable() || !motor.standalone())
+    Error_Handler();
+motor.setCurrent(1.0f); // A；正常业务维持原来的即时发送语义
+if (!motor.protect())
+    Error_Handler(); // 立即提交零电流，不再接受新的公开目标写入
+if (!motor.disable())
+    Error_Handler(); // 销毁前必须显式失能，且不再使用借用对象的 CAN 回调
+```
+
+保护和失能均绕过公开命令门控，直接发送原 VESC `SetCurrent` 的零值帧，不改扩展帧 ID、
+4 字节大端负载、单位或缩放；不发送独立的电调硬件失能指令，也不表示机械制动。
+仅 `Submitted` / `Queued` / `ReplacedOldest` 视为安全帧受理成功；其他结果调用
+`Error_Handler()`，不静默吞掉、不重试、不等待硬件反馈。普通业务命令仍为无返回值发送，
+不新增重试。发送受理不等于物理执行或停转，必须另行满足硬件安全要求。
+
+钩子不会启动总线或注册回调，宿主必须在使能前成功 `Can::start()`。Core 快照只管理状态与
+控制关系，不保证业务并发；生命周期、业务命令由宿主串行化。析构不自动停机或释放控制关系，
+所有相关节点须先显式失能，电机与总线仍须满足借用回调的寿命要求。
+
 ## `ERPM` 和 `electrodes` 的真实含义
 
 `VESC` 最容易误解的地方，是速度并不是直接按机械 `rpm` 在协议里传输，而是按 `ERPM`

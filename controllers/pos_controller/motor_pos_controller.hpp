@@ -54,23 +54,48 @@ public:
      * @param cfg 控制器配置
      */
     MotorPosController(motors::IMotor* motor, const Config& cfg);
-    ~MotorPosController() override;
+    /// 析构前必须由宿主显式失能；控制器不拥有电机。
+    ~MotorPosController() override = default;
 
     /**
      * @brief 周期更新控制器
      */
     void update() override;
     /**
-     * @brief 设置位置参考
+     * @brief 从直接调用方设置位置参考，仅 Standalone 接受
+     * @note Controlled / Disabled / Protected 均拒绝，拒绝不修改任何业务状态或输出。
+     *       调用须与生命周期、update()、PID 访问及直接电机命令串行化。
      * @param position 目标输出轴角度，单位 deg
-     * @param max_velocity 位置环输出的最大目标角速度限制；
+     * @param max_velocity 位置环输出的最大目标角速度限制，单位 rpm；
      *                     传 kNoLimit（默认）表示不施加额外限制
+     * @return true 仅表示接受参考，不代表发送受理或硬件执行；否则返回 false。
      */
-    void setRef(float position, float max_velocity = kNoLimit);
+    [[nodiscard]] bool setRef(float position, float max_velocity = kNoLimit);
+
+    /**
+     * @brief 从当前父节点设置位置参考
+     * @note 仅自身 Controlled 且 currentController() == &source 时接受；其他情况拒绝，
+     *       不修改任何业务状态或输出。不额外要求 source 已使能，允许父节点保护钩子提交安全参考。
+     *       source 是调用方显式声明，可用公开 owner 指针冒充，并非强身份认证；
+     *       不保护 raw IMotor / getMotor() 旁路。调用须与生命周期、update()、PID 访问
+     *       及直接电机命令串行化。
+     * @param source 声明的参考来源，必须为当前父节点
+     * @param position 目标输出轴角度，单位 deg
+     * @param max_velocity 位置环输出的最大目标角速度限制，单位 rpm；kNoLimit 表示不额外限制
+     * @return true 仅表示接受参考，不代表发送受理或硬件执行；否则返回 false。
+     */
+    [[nodiscard]] bool setRefFrom(const core::control::ControllerNode& source, float position,
+                                 float max_velocity = kNoLimit);
 
     static constexpr float kNoLimit = motors::IMotor::kNoLimit;
 
+protected:
+    void selfProtect() override;
+    void selfDisable() override;
+
 private:
+    void applyReference(float position, float max_velocity);
+
     PIDMotor position_pid_; ///< 外层位置环
     PIDMotor velocity_pid_; ///< 内层速度环
 

@@ -1,3 +1,4 @@
 name = "Core"
 pkgname = "MotorDrivers::Core"
 version = "0.1.0"
+dependencies = ["Core::IController"]

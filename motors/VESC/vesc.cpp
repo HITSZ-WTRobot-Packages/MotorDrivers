@@ -62,7 +62,7 @@ float VESCMotor::clamp(const float value, const float abs_max)
     return value;
 }
 
-void VESCMotor::sendSetCommand(const SetCommand cmd, const float value) const
+bsp::can::SendResult VESCMotor::sendSetCommand(const SetCommand cmd, const float value) const
 {
     int32_t data_value = 0;
 
@@ -94,7 +94,7 @@ void VESCMotor::sendSetCommand(const SetCommand cmd, const float value) const
         data_value = static_cast<int32_t>(clamp(value, kSetCurrentBrakeRelMax) * 1.0e5f);
         break;
     default:
-        return;
+        return bsp::can::SendResult::InvalidFrame;
     }
 
     // 标准 VESC 设置帧只使用前 4 个字节传数值，DLC 为 4。
@@ -111,19 +111,33 @@ void VESCMotor::sendSetCommand(const SetCommand cmd, const float value) const
         .data   = std::span<const uint8_t>{ data }
     };
 
-    // 与旧实现一致：命令接口无返回值，发送结果交由总线侧诊断处理，不做重试。
-    (void)cfg_.can.send(frame);
+    return cfg_.can.send(frame);
 }
 
-void VESCMotor::setCurrent(const float current)
+void VESCMotor::applyCurrent(const float current)
 {
-    sendSetCommand(SetCommand::SetCurrent, current);
+    // 保留原普通业务语义：无返回值、不重试，由总线侧诊断处理。
+    (void)sendSetCommand(SetCommand::SetCurrent, current);
 }
 
-void VESCMotor::setInternalVelocity(const float rpm, const float maxi)
+void VESCMotor::applyInternalVelocity(const float rpm, const float maxi)
 {
     (void)maxi;
-    sendSetCommand(SetCommand::SetRPM, rpm);
+    (void)sendSetCommand(SetCommand::SetRPM, rpm);
+}
+
+void VESCMotor::selfProtect()
+{
+    // 状态可能尚未提交或仍为 Disabled，不能经过公开 setCurrent() 门控。
+    const auto result = sendSetCommand(SetCommand::SetCurrent, 0.0f);
+    if (result != bsp::can::SendResult::Submitted && result != bsp::can::SendResult::Queued &&
+        result != bsp::can::SendResult::ReplacedOldest)
+        Error_Handler();
+}
+
+void VESCMotor::selfDisable()
+{
+    selfProtect();
 }
 
 // 前置条件：调用方（on_can）已确认 status_cmd 受支持，且 data 至少覆盖该状态包用到的

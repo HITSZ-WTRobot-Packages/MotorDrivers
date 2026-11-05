@@ -47,26 +47,40 @@ public:
      * @param cfg 控制器配置
      */
     MotorVelController(motors::IMotor* motor, const Config& cfg);
-    ~MotorVelController() override;
-
-    bool enable() override
-    {
-        // 速度控制器不支持 InternalPos，因为该模式表示电机只能接收位置指令。
-        return ctrl_mode_ != ControlMode::InternalPos && IController::enable();
-    }
+    /// 析构前必须由宿主显式失能；控制器不拥有电机。
+    ~MotorVelController() override = default;
 
     /**
      * @brief 周期更新控制器
      */
     void update() override;
     /**
-     * @brief 设置速度参考
+     * @brief 从直接调用方设置速度参考，仅 Standalone 接受
+     * @note Controlled / Disabled / Protected 均拒绝，拒绝不修改任何业务状态或输出。
+     *       调用须与生命周期、update()、PID 访问及直接电机命令串行化。
      * @param velocity 目标输出轴速度，单位 rpm
      * @param max_current 外部 PID 模式下临时电流/力矩输出上限；
      *                   传 kNoLimit（默认）表示不施加额外限制
-     * @param ff  前馈输入,使用者应该根据实际情况自己计算前馈值，直接传入该函数
+     * @param ff 前馈输入，量纲须匹配电机低层输入
+     * @return true 仅表示接受参考，不代表发送受理或硬件执行；否则返回 false。
      */
-    void setRef(float velocity, float max_current = kNoLimit, float ff = 0.0f);
+    [[nodiscard]] bool setRef(float velocity, float max_current = kNoLimit, float ff = 0.0f);
+
+    /**
+     * @brief 从当前父节点设置速度参考
+     * @note 仅自身 Controlled 且 currentController() == &source 时接受；其他情况拒绝，
+     *       不修改任何业务状态或输出。不额外要求 source 已使能，允许父节点保护钩子提交安全参考。
+     *       source 是调用方显式声明，可用公开 owner 指针冒充，并非强身份认证；
+     *       不保护 raw IMotor / getMotor() 旁路。调用须与生命周期、update()、PID 访问
+     *       及直接电机命令串行化。
+     * @param source 声明的参考来源，必须为当前父节点
+     * @param velocity 目标输出轴速度，单位 rpm
+     * @param max_current 外部 PID 临时电流/力矩输出上限，kNoLimit 表示不施加额外限制
+     * @param ff 前馈输入，量纲须匹配电机低层输入
+     * @return true 仅表示接受参考，不代表发送受理或硬件执行；否则返回 false。
+     */
+    [[nodiscard]] bool setRefFrom(const core::control::ControllerNode& source, float velocity,
+                                 float max_current = kNoLimit, float ff = 0.0f);
 
     /**
      * @brief 直接访问内部 PID 对象
@@ -75,7 +89,14 @@ public:
 
     static constexpr float kNoLimit = motors::IMotor::kNoLimit;
 
+protected:
+    bool selfEnable() override;
+    void selfProtect() override;
+    void selfDisable() override;
+
 private:
+    void applyReference(float velocity, float max_current, float ff);
+
     PIDMotor pid_;                    ///< 速度环 PID
     float    velocity_target_ = 0.0f; ///< 目标速度，默认单位 rpm
     float    ff_              = 0.0f; ///< 前馈输入
